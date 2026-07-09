@@ -1,0 +1,38 @@
+name: Deploy Cloud Run
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  GCP_PROJECT_ID: altbot-486317
+  GCP_REGION: us-central1
+  CLOUD_RUN_SERVICE: breakaway-hypothesis-watcher
+  ARTIFACT_REPO: breakaway-hypothesis
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+      - uses: google-github-actions/setup-gcloud@v2
+      - run: gcloud auth configure-docker "$GCP_REGION-docker.pkg.dev" --quiet
+      - run: docker build -t "$GCP_REGION-docker.pkg.dev/$GCP_PROJECT_ID/$ARTIFACT_REPO/watcher:${{ github.sha }}" .
+      - run: docker push "$GCP_REGION-docker.pkg.dev/$GCP_PROJECT_ID/$ARTIFACT_REPO/watcher:${{ github.sha }}"
+      - uses: google-github-actions/deploy-cloudrun@v2
+        with:
+          project_id: ${{ env.GCP_PROJECT_ID }}
+          service: ${{ env.CLOUD_RUN_SERVICE }}
+          region: ${{ env.GCP_REGION }}
+          image: ${{ env.GCP_REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.ARTIFACT_REPO }}/watcher:${{ github.sha }}
+          flags: --no-allow-unauthenticated
+          env_vars: |-
+            DRY_RUN=true
+            RUN_MIGRATIONS_ON_START=false

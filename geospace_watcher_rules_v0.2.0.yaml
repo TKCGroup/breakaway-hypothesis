@@ -1,0 +1,72 @@
+version: 0.2.0
+mode: dry_run
+freshness:
+  max_event_age_hours: 12
+  source_stale_hours:
+    usgs_earthquake_geojson: 2
+    usgs_fdsn_backfill: 24
+    usgs_hans: 24
+    swpc_kp: 2
+    swpc_goes_xray: 1
+    swpc_solar_wind: 1
+    nasa_donki: 12
+    tsunami_ntwc: 2
+    tsunami_ptwc: 2
+space_weather:
+  watch_window_hours: [6, 24, 72]
+  s1_triggers:
+    kp_g1: 5
+    kp_g2: 6
+    flare_min_class: M5
+    flare_high_class: X1
+    cme_arrival_required_for_cme_stage: true
+    proton_density_spike_ratio: 2.0
+    bz_south_nt: -10
+regions:
+  CASCADE_VOLCANOES_RAINIER:
+    center: [46.8523, -121.7603]
+    radius_km: 25
+    alert_thresholds:
+      m_min_alert: 3.5
+      swarm_count_24h: 50
+      swarm_rate_x_baseline: 4.0
+      shallow_depth_km_max: 8
+      escalate_if_hans_not_normal: true
+  CASCADE_VOLCANOES_ST_HELENS:
+    center: [46.1912, -122.1944]
+    radius_km: 25
+    alert_thresholds:
+      m_min_alert: 3.0
+      swarm_count_24h: 30
+      swarm_rate_x_baseline: 3.0
+      shallow_depth_km_max: 8
+      escalate_if_hans_not_normal: true
+  YELLOWSTONE:
+    center: [44.4300, -110.6700]
+    radius_km: 80
+    alert_thresholds:
+      m_min_alert: 3.5
+      swarm_count_24h: 100
+      swarm_rate_x_baseline: 4.0
+      shallow_depth_km_max: 10
+      escalate_if_hans_not_normal: true
+  PNW_CASCADIA_OFFSHORE:
+    bbox: [-132.5, 40.0, -122.0, 52.5]
+    alert_thresholds:
+      m_min_alert: 4.5
+      tsunami_check: true
+      swarm_rate_x_baseline: 3.0
+  CALIFORNIA_FAULTS:
+    bbox: [-125.0, 32.0, -114.0, 42.5]
+    alert_thresholds:
+      m_min_alert: 4.5
+      population_center_m_min: 3.5
+      swarm_rate_x_baseline: 3.0
+notifier:
+  min_stage_to_notify: S3
+  always_notify:
+    - tsunami_warning
+    - tsunami_advisory
+    - usgs_hans_elevated
+    - earthquake_m45_plus_target_region
+  suppress_duplicate_hours: 24

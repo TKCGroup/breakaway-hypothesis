@@ -1,0 +1,29 @@
+substitutions:
+  _REGION: us-central1
+  _SERVICE: breakaway-hypothesis-watcher
+
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -t
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/breakaway-hypothesis/watcher:$COMMIT_SHA
+      - .
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/breakaway-hypothesis/watcher:$COMMIT_SHA
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - ${_SERVICE}
+      - --image=${_REGION}-docker.pkg.dev/$PROJECT_ID/breakaway-hypothesis/watcher:$COMMIT_SHA
+      - --region=${_REGION}
+      - --platform=managed
+      - --no-allow-unauthenticated
+      - --set-env-vars=DRY_RUN=true,RUN_MIGRATIONS_ON_START=false
+
+images:
+  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/breakaway-hypothesis/watcher:$COMMIT_SHA
