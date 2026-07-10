@@ -4,6 +4,7 @@ import { InMemoryWatcherRepository, type WatcherRepository } from "./db/reposito
 import { evaluateCascade } from "./logic/cascade.js";
 import { DryRunNotifier } from "./logic/notifier.js";
 import { WatcherScheduler } from "./scheduler.js";
+import { fetchDonkiEvents } from "./sources/donki.js";
 import { fetchSwpcKp } from "./sources/swpc.js";
 import { fetchTsunamiFeed } from "./sources/tsunami.js";
 import { fetchUsgsEarthquakeFeed } from "./sources/usgsEarthquake.js";
@@ -23,6 +24,7 @@ export async function runOnce(now = new Date(), repo: WatcherRepository = new In
     { source: "usgs_earthquake_geojson", run: () => fetchUsgsEarthquakeFeed("all_day", now) },
     { source: "usgs_hans", run: () => fetchHansElevatedVolcanoes(now) },
     { source: "swpc_kp", run: () => fetchSwpcKp(now) },
+    { source: "nasa_donki", run: () => fetchDonkiEvents(config.nasaApiKey, now) },
     { source: "tsunami_ntwc", run: () => fetchTsunamiFeed("ntwc", now) },
     { source: "tsunami_ptwc", run: () => fetchTsunamiFeed("ptwc", now) }
   ];

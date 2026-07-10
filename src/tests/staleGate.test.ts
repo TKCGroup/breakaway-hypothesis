@@ -68,4 +68,20 @@ describe("stale gate", () => {
     expect(result.passed).toBe(true);
     expect(result.reasons).toEqual([]);
   });
+
+  it("accepts official NASA DONKI webtools links", () => {
+    const result = evaluateStaleGate(
+      eventFixture({
+        source: "nasa_donki",
+        eventType: "space_weather",
+        title: "NASA DONKI CME",
+        eventTime: new Date("2026-07-08T11:00:00.000Z"),
+        sourceUpdatedAt: new Date("2026-07-08T11:15:00.000Z"),
+        officialUrl: "https://webtools.ccmc.gsfc.nasa.gov/DONKI/view/CME/123"
+      }),
+      { now: NOW }
+    );
+
+    expect(result.passed).toBe(true);
+  });
 });

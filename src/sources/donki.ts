@@ -10,11 +10,29 @@ export function donkiUrl(kind: "CME" | "FLR" | "GST" | "IPS" | "SEP" | "HSS", st
   return `https://api.nasa.gov/DONKI/${kind}?${query.toString()}`;
 }
 
+export async function fetchDonkiEvents(apiKey = "DEMO_KEY", now = new Date()): Promise<NormalizedEvent[]> {
+  const endDate = now;
+  const startDate = new Date(now.getTime() - 7 * 24 * 3_600_000);
+  const kinds = ["CME", "FLR", "GST", "IPS", "SEP", "HSS"] as const;
+  const batches = await Promise.all(
+    kinds.map(async (kind) => {
+      const response = await fetch(donkiUrl(kind, startDate, endDate, apiKey), { cache: "no-store" });
+      if (!response.ok) {
+        throw new Error(`NASA DONKI ${kind} failed: ${response.status} ${response.statusText}`);
+      }
+      const rows = (await response.json()) as Record<string, unknown>[];
+      return rows.map((row) => normalizeDonkiEvent(kind, row, now));
+    })
+  );
+  return batches.flat();
+}
+
 export function normalizeDonkiEvent(kind: string, raw: Record<string, unknown>, ingestTime = new Date()): NormalizedEvent {
   const externalId = stringField(raw, ["activityID", "flrID", "gstID", "ipsID", "sepID", "hssID"]) ?? `${kind}:${JSON.stringify(raw).slice(0, 80)}`;
   const eventTime =
     dateField(raw, ["startTime", "beginTime", "eventTime", "peakTime", "submissionTime"]) ?? ingestTime;
   const sourceUpdatedAt = dateField(raw, ["submissionTime", "link"]) ?? ingestTime;
+  const classType = stringField(raw, ["classType"]);
   return {
     id: stableId("nasa_donki", externalId),
     source: "nasa_donki",
@@ -24,7 +42,7 @@ export function normalizeDonkiEvent(kind: string, raw: Record<string, unknown>, 
     eventTime,
     sourceUpdatedAt,
     ingestTime,
-    severity: kind,
+    severity: kind === "FLR" && classType ? classType : kind,
     officialUrl: typeof raw.link === "string" ? raw.link : "https://api.nasa.gov/DONKI/",
     rawJson: raw
   };

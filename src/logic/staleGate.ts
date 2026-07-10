@@ -95,6 +95,8 @@ function looksLikeOfficialUrl(url: string): boolean {
       "services.swpc.noaa.gov",
       "api.nasa.gov",
       "kauai.ccmc.gsfc.nasa.gov",
+      "webtools.ccmc.gsfc.nasa.gov",
+      "ccmc.gsfc.nasa.gov",
       "tsunami.gov",
       "www.tsunami.gov",
       "weather.gov",

@@ -26,7 +26,9 @@ export function createSpaceWeatherWindow(
   const shouldOpen =
     Number.isFinite(kp) && kp >= config.spaceWeather.s1Triggers.kpG1
       ? true
-      : flareClass !== undefined && compareFlareClass(flareClass, config.spaceWeather.s1Triggers.flareMinClass) >= 0;
+      : flareClass !== undefined && compareFlareClass(flareClass, config.spaceWeather.s1Triggers.flareMinClass) >= 0
+        ? true
+        : isDonkiImpulse(event);
 
   if (!shouldOpen) {
     return undefined;
@@ -153,6 +155,14 @@ function isHansElevated(event: NormalizedEvent): boolean {
 function isTsunamiAlert(event: NormalizedEvent): boolean {
   const severity = (event.severity ?? event.title).toLowerCase();
   return severity.includes("warning") || severity.includes("advisory");
+}
+
+function isDonkiImpulse(event: NormalizedEvent): boolean {
+  if (event.source !== "nasa_donki") {
+    return false;
+  }
+  const severity = (event.severity ?? "").toUpperCase();
+  return ["CME", "GST", "IPS", "SEP", "HSS"].includes(severity);
 }
 
 export function compareFlareClass(actual: string, threshold: string): number {
