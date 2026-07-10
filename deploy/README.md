@@ -7,7 +7,7 @@ Recommended shape:
 - Cloud Run service runs the HTTP watcher entrypoint.
 - Cloud Scheduler sends authenticated `POST /run` every 15 minutes.
 - Cloud SQL for PostgreSQL stores events, source runs, windows, cascade states, and notifications.
-- Secret Manager stores `DATABASE_URL`, `NASA_API_KEY`, `NOTIFY_WEBHOOK_URL`, and optional `SCHEDULER_SHARED_SECRET`.
+- Secret Manager stores `DATABASE_URL`, `NASA_API_KEY`, optional `NOTIFY_WEBHOOK_URL`, and `SCHEDULER_SHARED_SECRET`.
 
 ## Service
 
@@ -16,11 +16,13 @@ The container exposes:
 - `GET /healthz`
 - `POST /run`
 
-`POST /run` has an in-process overlap lock and returns `409` if a previous poll is still running. If `SCHEDULER_SHARED_SECRET` is set, callers must send:
+`POST /run` has an in-process overlap lock and returns `409` if a previous poll is still running. `SCHEDULER_SHARED_SECRET` is required; if unset the service returns `503`. Callers must send:
 
 ```text
-Authorization: Bearer <SCHEDULER_SHARED_SECRET>
+X-BREAKAWAY-CRON-KEY: <SCHEDULER_SHARED_SECRET>
 ```
+
+Cloud Run stays private. Cloud Scheduler should use OIDC invoker auth plus the shared secret header.
 
 ## One-Time GCP Setup
 
@@ -30,40 +32,53 @@ gcloud services enable run.googleapis.com cloudbuild.googleapis.com artifactregi
 gcloud artifacts repositories create breakaway-hypothesis --repository-format=docker --location=us-central1
 ```
 
-Create secrets:
+Altbot provisioned the core backend:
+
+- Cloud SQL instance: `altbot-486317:us-central1:altbot-depot`
+- Database: `breakaway`
+- User: `breakaway_app`
+- Runtime service account: `swarm-agent@altbot-486317.iam.gserviceaccount.com`
+- `DATABASE_URL`: Secret Manager `BREAKAWAY_DATABASE_URL`
+- `NASA_API_KEY`: Secret Manager `NASA_API_KEY`
+- `SCHEDULER_SHARED_SECRET`: Secret Manager `BREAKAWAY_SCHEDULER_SHARED_SECRET`
+
+`NOTIFY_WEBHOOK_URL` is not provisioned yet. Tyler must provide a Slack incoming webhook, then create `BREAKAWAY_NOTIFY_WEBHOOK_URL` and grant `swarm-agent@altbot-486317.iam.gserviceaccount.com` `roles/secretmanager.secretAccessor`.
+
+Deploy v1 from a machine authenticated as `tkc-v7-dev@altbot-486317.iam.gserviceaccount.com`:
 
 ```bash
-printf '%s' '<postgres-url>' | gcloud secrets create breakaway-database-url --data-file=-
-printf '%s' '<nasa-api-key>' | gcloud secrets create breakaway-nasa-api-key --data-file=-
-printf '%s' '<dry-run-or-live-webhook>' | gcloud secrets create breakaway-notify-webhook-url --data-file=-
-printf '%s' '<random-shared-secret>' | gcloud secrets create breakaway-scheduler-secret --data-file=-
-```
-
-Deploy from this repo:
-
-```bash
-gcloud builds submit --config deploy/cloudbuild.yaml --project altbot-486317
-```
-
-After the first deploy, attach secrets:
-
-```bash
-gcloud run services update breakaway-hypothesis-watcher \
+gcloud run deploy breakaway-hypothesis-watcher \
+  --source . \
   --region us-central1 \
-  --set-secrets DATABASE_URL=breakaway-database-url:latest,NASA_API_KEY=breakaway-nasa-api-key:latest,NOTIFY_WEBHOOK_URL=breakaway-notify-webhook-url:latest,SCHEDULER_SHARED_SECRET=breakaway-scheduler-secret:latest \
-  --set-env-vars DRY_RUN=true,RUN_MIGRATIONS_ON_START=true
+  --project altbot-486317 \
+  --service-account swarm-agent@altbot-486317.iam.gserviceaccount.com \
+  --add-cloudsql-instances altbot-486317:us-central1:altbot-depot \
+  --no-allow-unauthenticated \
+  --set-secrets DATABASE_URL=BREAKAWAY_DATABASE_URL:latest,NASA_API_KEY=NASA_API_KEY:latest,SCHEDULER_SHARED_SECRET=BREAKAWAY_SCHEDULER_SHARED_SECRET:latest \
+  --update-env-vars DRY_RUN=true,RUN_MIGRATIONS_ON_START=true,NODE_ENV=production
 ```
 
-Create scheduler job after confirming `/healthz`:
+For later redeploys prefer `--update-env-vars` / `--update-secrets`. Avoid `--set-*` on updates unless intentionally replacing the full set.
+
+Create the Scheduler job after confirming `/healthz`:
 
 ```bash
-SERVICE_URL="$(gcloud run services describe breakaway-hypothesis-watcher --region us-central1 --format='value(status.url)')"
-gcloud scheduler jobs create http breakaway-hypothesis-watcher-15m \
+KEY="$(gcloud secrets versions access latest --secret=BREAKAWAY_SCHEDULER_SHARED_SECRET --project=altbot-486317)"
+SERVICE_URL="$(gcloud run services describe breakaway-hypothesis-watcher --region us-central1 --project altbot-486317 --format='value(status.url)')"
+gcloud run services add-iam-policy-binding breakaway-hypothesis-watcher \
+  --region us-central1 \
+  --project altbot-486317 \
+  --member=serviceAccount:swarm-agent@altbot-486317.iam.gserviceaccount.com \
+  --role=roles/run.invoker
+gcloud scheduler jobs create http breakaway-watcher-run \
   --location us-central1 \
+  --project altbot-486317 \
   --schedule '*/15 * * * *' \
+  --time-zone America/Chicago \
   --uri "$SERVICE_URL/run" \
   --http-method POST \
-  --oidc-service-account-email '<scheduler-invoker-sa>@altbot-486317.iam.gserviceaccount.com'
+  --headers "X-BREAKAWAY-CRON-KEY=${KEY}" \
+  --oidc-service-account-email swarm-agent@altbot-486317.iam.gserviceaccount.com
 ```
 
 Keep `DRY_RUN=true` until official-feed dry-run output is reviewed and tests pass in CI.

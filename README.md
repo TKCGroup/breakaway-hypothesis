@@ -36,7 +36,7 @@ The production entrypoint is `src/server.ts`:
 - `GET /healthz` returns basic service status.
 - `POST /run` executes one official-feed poll.
 - Concurrent `/run` calls are rejected with `409`.
-- If `SCHEDULER_SHARED_SECRET` is set, `/run` requires `Authorization: Bearer <secret>`.
+- `/run` requires `SCHEDULER_SHARED_SECRET` and the `X-BREAKAWAY-CRON-KEY` header.
 
 Deployment scaffolding lives in `deploy/` and targets the Altbot GCP project `altbot-486317`.
 

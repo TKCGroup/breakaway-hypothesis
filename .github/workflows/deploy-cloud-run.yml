@@ -32,7 +32,12 @@ jobs:
           service: ${{ env.CLOUD_RUN_SERVICE }}
           region: ${{ env.GCP_REGION }}
           image: ${{ env.GCP_REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.ARTIFACT_REPO }}/watcher:${{ github.sha }}
-          flags: --no-allow-unauthenticated
+          flags: >-
+            --no-allow-unauthenticated
+            --service-account=swarm-agent@altbot-486317.iam.gserviceaccount.com
+            --add-cloudsql-instances=altbot-486317:us-central1:altbot-depot
+            --set-secrets=DATABASE_URL=BREAKAWAY_DATABASE_URL:latest,NASA_API_KEY=NASA_API_KEY:latest,SCHEDULER_SHARED_SECRET=BREAKAWAY_SCHEDULER_SHARED_SECRET:latest
           env_vars: |-
             DRY_RUN=true
-            RUN_MIGRATIONS_ON_START=false
+            RUN_MIGRATIONS_ON_START=true
+            NODE_ENV=production

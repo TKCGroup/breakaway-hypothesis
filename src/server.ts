@@ -6,7 +6,6 @@ import { runOnce } from "./worker.js";
 
 const config = loadConfig();
 const port = Number(process.env.PORT ?? 8080);
-const schedulerSecret = process.env.SCHEDULER_SHARED_SECRET;
 let running = false;
 
 async function handleRun(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -15,7 +14,13 @@ async function handleRun(req: IncomingMessage, res: ServerResponse): Promise<voi
     return;
   }
 
-  if (schedulerSecret && req.headers.authorization !== `Bearer ${schedulerSecret}`) {
+  const schedulerSecret = process.env.SCHEDULER_SHARED_SECRET;
+  if (!schedulerSecret) {
+    writeJson(res, 503, { ok: false, error: "scheduler_secret_unset" });
+    return;
+  }
+
+  if (req.headers["x-breakaway-cron-key"] !== schedulerSecret) {
     writeJson(res, 401, { ok: false, error: "unauthorized" });
     return;
   }

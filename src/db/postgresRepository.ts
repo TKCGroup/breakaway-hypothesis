@@ -80,7 +80,7 @@ export class PostgresWatcherRepository implements WatcherRepository {
   constructor(private readonly pool: Pool) {}
 
   static fromConnectionString(databaseUrl: string): PostgresWatcherRepository {
-    return new PostgresWatcherRepository(new Pool({ connectionString: databaseUrl }));
+    return new PostgresWatcherRepository(new Pool({ connectionString: databaseUrl, max: 5 }));
   }
 
   async close(): Promise<void> {

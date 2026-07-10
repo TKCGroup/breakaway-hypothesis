@@ -22,8 +22,11 @@ steps:
       - --image=${_REGION}-docker.pkg.dev/$PROJECT_ID/breakaway-hypothesis/watcher:$COMMIT_SHA
       - --region=${_REGION}
       - --platform=managed
+      - --service-account=swarm-agent@altbot-486317.iam.gserviceaccount.com
+      - --add-cloudsql-instances=altbot-486317:us-central1:altbot-depot
       - --no-allow-unauthenticated
-      - --set-env-vars=DRY_RUN=true,RUN_MIGRATIONS_ON_START=false
+      - --set-secrets=DATABASE_URL=BREAKAWAY_DATABASE_URL:latest,NASA_API_KEY=NASA_API_KEY:latest,SCHEDULER_SHARED_SECRET=BREAKAWAY_SCHEDULER_SHARED_SECRET:latest
+      - --set-env-vars=DRY_RUN=true,RUN_MIGRATIONS_ON_START=true,NODE_ENV=production
 
 images:
   - ${_REGION}-docker.pkg.dev/$PROJECT_ID/breakaway-hypothesis/watcher:$COMMIT_SHA
