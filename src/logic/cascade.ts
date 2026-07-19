@@ -74,6 +74,11 @@ export function evaluateCascade(input: CascadeInput): CascadeState {
     reason = `official tsunami ${input.event.severity ?? "product"} from ${input.event.source}`;
     confidence = 0.95;
     shouldNotify = true;
+  } else if (input.event.eventType === "volcano_notice" && !input.event.region) {
+    stage = "S0";
+    reason = "official HANS notice outside configured target regions";
+    confidence = 0.2;
+    shouldNotify = false;
   } else if (input.event.eventType === "volcano_notice" && isHansElevated(input.event)) {
     stage = "S4";
     reason = `USGS HANS elevated volcano status: ${input.event.severity}`;

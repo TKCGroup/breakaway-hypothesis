@@ -28,11 +28,13 @@ export function normalizeHansNotice(raw: unknown, ingestTime = new Date(), fallb
   const obj = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
   const volcanoName = stringField(obj, ["volcanoName", "volcano_name", "name", "volcanoCd"]) ?? "Unknown volcano";
   const externalId =
-    stringField(obj, ["id", "noticeId", "notice_id", "vnum", "volcanoCd"]) ??
+    stringField(obj, ["id", "noticeId", "notice_id", "notice_identifier", "vnum", "volcanoCd"]) ??
     `${volcanoName}:${fallbackIndex}:${JSON.stringify(raw).slice(0, 80)}`;
   const eventTime =
-    dateField(obj, ["issueDate", "issued", "noticeDate", "startDate", "updateTime", "updated"]) ?? ingestTime;
-  const sourceUpdatedAt = dateField(obj, ["updateTime", "updated", "issueDate", "issued", "noticeDate"]) ?? eventTime;
+    dateField(obj, ["sent_utc", "issueDate", "issued", "noticeDate", "startDate", "updateTime", "updated"]) ??
+    ingestTime;
+  const sourceUpdatedAt =
+    dateField(obj, ["sent_utc", "updateTime", "updated", "issueDate", "issued", "noticeDate"]) ?? eventTime;
   const alertLevel = stringField(obj, ["alertLevel", "alert_level", "alert", "status"]);
   const colorCode = stringField(obj, ["colorCode", "color_code", "aviationColorCode"]);
   const severity = [alertLevel, colorCode].filter(Boolean).join("/") || "UNKNOWN";
@@ -48,7 +50,7 @@ export function normalizeHansNotice(raw: unknown, ingestTime = new Date(), fallb
     ingestTime,
     region: regionFromVolcanoName(volcanoName),
     severity,
-    officialUrl: "https://volcanoes.usgs.gov/hans-public/",
+    officialUrl: stringField(obj, ["notice_url", "url", "link"]) ?? "https://volcanoes.usgs.gov/hans-public/",
     rawJson: raw
   };
 }

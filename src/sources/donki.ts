@@ -14,7 +14,7 @@ export async function fetchDonkiEvents(apiKey = "DEMO_KEY", now = new Date()): P
   const endDate = now;
   const startDate = new Date(now.getTime() - 7 * 24 * 3_600_000);
   const kinds = ["CME", "FLR", "GST", "IPS", "SEP", "HSS"] as const;
-  const batches = await Promise.all(
+  const batches = await Promise.allSettled(
     kinds.map(async (kind) => {
       const response = await fetch(donkiUrl(kind, startDate, endDate, apiKey), { cache: "no-store" });
       if (!response.ok) {
@@ -24,7 +24,12 @@ export async function fetchDonkiEvents(apiKey = "DEMO_KEY", now = new Date()): P
       return rows.map((row) => normalizeDonkiEvent(kind, row, now));
     })
   );
-  return batches.flat();
+  for (const [index, batch] of batches.entries()) {
+    if (batch.status === "rejected") {
+      console.error(batch.reason instanceof Error ? batch.reason.message : `NASA DONKI ${kinds[index]} failed`);
+    }
+  }
+  return batches.flatMap((batch) => (batch.status === "fulfilled" ? batch.value : []));
 }
 
 export function normalizeDonkiEvent(kind: string, raw: Record<string, unknown>, ingestTime = new Date()): NormalizedEvent {
