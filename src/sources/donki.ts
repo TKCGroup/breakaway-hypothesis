@@ -1,7 +1,10 @@
 import { createHash } from "node:crypto";
 import type { NormalizedEvent } from "../types.js";
 
-export function donkiUrl(kind: "CME" | "FLR" | "GST" | "IPS" | "SEP" | "HSS", startDate: Date, endDate: Date, apiKey = "DEMO_KEY"): string {
+export const DONKI_KINDS = ["CME", "FLR", "GST", "IPS", "SEP", "HSS"] as const;
+export type DonkiKind = (typeof DONKI_KINDS)[number];
+
+export function donkiUrl(kind: DonkiKind, startDate: Date, endDate: Date, apiKey = "DEMO_KEY"): string {
   const query = new URLSearchParams({
     startDate: startDate.toISOString().slice(0, 10),
     endDate: endDate.toISOString().slice(0, 10),
@@ -10,17 +13,16 @@ export function donkiUrl(kind: "CME" | "FLR" | "GST" | "IPS" | "SEP" | "HSS", st
   return `https://api.nasa.gov/DONKI/${kind}?${query.toString()}`;
 }
 
-export async function fetchDonkiEvents(apiKey = "DEMO_KEY", now = new Date()): Promise<NormalizedEvent[]> {
+export async function fetchDonkiEvents(
+  apiKey = "DEMO_KEY",
+  now = new Date(),
+  kinds: readonly DonkiKind[] = DONKI_KINDS
+): Promise<NormalizedEvent[]> {
   const endDate = now;
   const startDate = new Date(now.getTime() - 7 * 24 * 3_600_000);
-  const kinds = ["CME", "FLR", "GST", "IPS", "SEP", "HSS"] as const;
   const batches = await Promise.allSettled(
     kinds.map(async (kind) => {
-      const response = await fetch(donkiUrl(kind, startDate, endDate, apiKey), { cache: "no-store" });
-      if (!response.ok) {
-        throw new Error(`NASA DONKI ${kind} failed: ${response.status} ${response.statusText}`);
-      }
-      const rows = (await response.json()) as Record<string, unknown>[];
+      const rows = await fetchDonkiRows(kind, donkiUrl(kind, startDate, endDate, apiKey));
       return rows.map((row) => normalizeDonkiEvent(kind, row, now));
     })
   );
@@ -30,6 +32,25 @@ export async function fetchDonkiEvents(apiKey = "DEMO_KEY", now = new Date()): P
     }
   }
   return batches.flatMap((batch) => (batch.status === "fulfilled" ? batch.value : []));
+}
+
+async function fetchDonkiRows(kind: DonkiKind, url: string, maxAttempts = 3): Promise<Record<string, unknown>[]> {
+  let lastError: Error | undefined;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const response = await fetch(url, { cache: "no-store" });
+    if (response.ok) {
+      return (await response.json()) as Record<string, unknown>[];
+    }
+
+    lastError = new Error(`NASA DONKI ${kind} failed: ${response.status} ${response.statusText}`);
+    if (response.status < 500 || attempt === maxAttempts) {
+      break;
+    }
+    await sleep(attempt * 250);
+  }
+
+  throw lastError ?? new Error(`NASA DONKI ${kind} failed`);
 }
 
 export function normalizeDonkiEvent(kind: string, raw: Record<string, unknown>, ingestTime = new Date()): NormalizedEvent {
@@ -74,4 +95,8 @@ function dateField(obj: Record<string, unknown>, names: string[]): Date | undefi
 
 function stableId(source: string, externalId: string): string {
   return createHash("sha256").update(`${source}:${externalId}`).digest("hex").slice(0, 24);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

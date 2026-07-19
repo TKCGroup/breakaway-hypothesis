@@ -1,4 +1,4 @@
-import type { AlertPayload, CascadeState, NormalizedEvent } from "../types.js";
+import type { AlertPayload, CascadeState, NormalizedEvent, NotificationRecord as PersistedNotificationRecord } from "../types.js";
 
 export interface SlackWebhookPayload {
   text: string;
@@ -27,17 +27,23 @@ export interface NotifierOptions {
   now?: Date;
 }
 
-interface NotificationRecord {
+type NotificationChannel = NonNullable<NotificationResult["channel"]>;
+
+interface InMemoryNotificationRecord {
   stageRank: number;
   sentAt: Date;
 }
 
 export class DryRunNotifier {
-  private readonly sent = new Map<string, NotificationRecord>();
+  private readonly sent = new Map<string, InMemoryNotificationRecord>();
 
   constructor(private readonly options: NotifierOptions) {}
 
-  async notify(event: NormalizedEvent, state: CascadeState): Promise<NotificationResult> {
+  async notify(
+    event: NormalizedEvent,
+    state: CascadeState,
+    previousNotifications: PersistedNotificationRecord[] = []
+  ): Promise<NotificationResult> {
     const now = this.options.now ?? new Date();
     if (!state.shouldNotify) {
       return { sent: false, suppressed: true, dryRun: this.options.dryRun, reason: "state_should_notify_false" };
@@ -47,6 +53,18 @@ export class DryRunNotifier {
     }
 
     const payload = buildAlertPayload(event, state, this.options.dryRun);
+    const channel = this.resolveChannel();
+    const persistedDuplicate = findRecentPersistedDuplicate(
+      previousNotifications,
+      notificationDedupeKey(payload, state),
+      channel,
+      now,
+      this.options.suppressDuplicateHours
+    );
+    if (persistedDuplicate) {
+      return { sent: false, suppressed: true, dryRun: this.options.dryRun, channel, payload, reason: "persistent_duplicate" };
+    }
+
     const record = this.sent.get(payload.dedupeKey);
     const currentRank = stageRank(state.stage);
     const suppressMs = this.options.suppressDuplicateHours * 3_600_000;
@@ -57,10 +75,10 @@ export class DryRunNotifier {
     this.sent.set(payload.dedupeKey, { stageRank: currentRank, sentAt: now });
 
     if (this.options.dryRun) {
-      return { sent: false, suppressed: false, dryRun: true, channel: "dry_run", payload, reason: "dry_run" };
+      return { sent: false, suppressed: false, dryRun: true, channel, payload, reason: "dry_run" };
     }
 
-    if (this.options.slackBotToken && this.options.slackChannelId) {
+    if (channel === "slack_bot" && this.options.slackBotToken && this.options.slackChannelId) {
       const response = await fetch("https://slack.com/api/chat.postMessage", {
         method: "POST",
         headers: {
@@ -76,10 +94,10 @@ export class DryRunNotifier {
       if (!slackResult.ok) {
         throw new Error(`Slack bot notification failed: ${slackResult.error ?? "unknown_error"}`);
       }
-      return { sent: true, suppressed: false, dryRun: false, channel: "slack_bot", payload };
+      return { sent: true, suppressed: false, dryRun: false, channel, payload };
     }
 
-    if (this.options.webhookUrl) {
+    if (channel === "webhook" && this.options.webhookUrl) {
       const response = await fetch(this.options.webhookUrl, {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -88,13 +106,49 @@ export class DryRunNotifier {
       if (!response.ok) {
         throw new Error(`Notification webhook failed: ${response.status} ${response.statusText}`);
       }
-      return { sent: true, suppressed: false, dryRun: false, channel: "webhook", payload };
+      return { sent: true, suppressed: false, dryRun: false, channel, payload };
     }
 
     throw new Error(
       "SLACK_BOT_TOKEN and SLACK_CHANNEL_ID, or NOTIFY_WEBHOOK_URL, are required when DRY_RUN=false"
     );
   }
+
+  private resolveChannel(): NotificationChannel {
+    if (this.options.dryRun) {
+      return "dry_run";
+    }
+    if (this.options.slackBotToken && this.options.slackChannelId) {
+      return "slack_bot";
+    }
+    if (this.options.webhookUrl) {
+      return "webhook";
+    }
+    throw new Error(
+      "SLACK_BOT_TOKEN and SLACK_CHANNEL_ID, or NOTIFY_WEBHOOK_URL, are required when DRY_RUN=false"
+    );
+  }
+}
+
+export function notificationDedupeKey(payload: AlertPayload, state: CascadeState): string {
+  return `${payload.dedupeKey}:${state.stage}`;
+}
+
+function findRecentPersistedDuplicate(
+  notifications: PersistedNotificationRecord[],
+  dedupeKey: string,
+  channel: NotificationChannel,
+  now: Date,
+  suppressDuplicateHours: number
+): PersistedNotificationRecord | undefined {
+  const suppressMs = suppressDuplicateHours * 3_600_000;
+  const channels = channel === "dry_run" ? new Set(["dry_run"]) : new Set(["slack_bot", "webhook"]);
+  return notifications.find(
+    (notification) =>
+      notification.dedupeKey === dedupeKey &&
+      channels.has(notification.channel) &&
+      now.getTime() - notification.sentAt.getTime() < suppressMs
+  );
 }
 
 export function buildSlackBotPostPayload(payload: AlertPayload, channel: string): SlackBotPostPayload {

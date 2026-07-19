@@ -1,5 +1,5 @@
 import { stableEventDedupeKey } from "../logic/staleGate.js";
-import type { CascadeState, NormalizedEvent, NotificationRecord, SourceRun, WatchWindow } from "../types.js";
+import type { CascadeState, NormalizedEvent, NotificationRecord, RegionBaseline, SourceRun, WatchWindow } from "../types.js";
 
 export interface EventUpsertResult {
   event: NormalizedEvent;
@@ -18,6 +18,8 @@ export interface WatcherRepository {
   listCascadeStates(): Promise<CascadeState[]>;
   saveNotification(notification: NotificationRecord): Promise<void>;
   listNotifications(): Promise<NotificationRecord[]>;
+  saveRegionBaseline(baseline: RegionBaseline): Promise<void>;
+  listRegionBaselines(): Promise<RegionBaseline[]>;
 }
 
 export class InMemoryWatcherRepository implements WatcherRepository {
@@ -27,6 +29,7 @@ export class InMemoryWatcherRepository implements WatcherRepository {
   private readonly states = new Map<string, CascadeState>();
   private readonly sourceRuns = new Map<string, SourceRun>();
   private readonly notifications = new Map<string, NotificationRecord>();
+  private readonly baselines = new Map<string, RegionBaseline>();
 
   async startSourceRun(source: string, startedAt = new Date()): Promise<SourceRun> {
     const run: SourceRun = {
@@ -96,10 +99,21 @@ export class InMemoryWatcherRepository implements WatcherRepository {
   }
 
   async saveNotification(notification: NotificationRecord): Promise<void> {
-    this.notifications.set(notification.dedupeKey, notification);
+    const existing = this.notifications.get(notification.dedupeKey);
+    if (!existing || (existing.channel === "dry_run" && notification.channel !== "dry_run")) {
+      this.notifications.set(notification.dedupeKey, notification);
+    }
   }
 
   async listNotifications(): Promise<NotificationRecord[]> {
     return [...this.notifications.values()];
+  }
+
+  async saveRegionBaseline(baseline: RegionBaseline): Promise<void> {
+    this.baselines.set(`${baseline.region}:${baseline.metric}:${baseline.windowDays}`, baseline);
+  }
+
+  async listRegionBaselines(): Promise<RegionBaseline[]> {
+    return [...this.baselines.values()];
   }
 }

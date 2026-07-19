@@ -126,3 +126,12 @@ export interface NotificationRecord {
   body: string;
   dedupeKey: string;
 }
+
+export interface RegionBaseline {
+  region: RegionId;
+  metric: "earthquakes_count_24h";
+  windowDays: number;
+  computedAt: Date;
+  value: number;
+  sampleCount: number;
+}

@@ -3,7 +3,8 @@ import {
   DryRunNotifier,
   buildAlertPayload,
   buildSlackBotPostPayload,
-  buildSlackWebhookPayload
+  buildSlackWebhookPayload,
+  notificationDedupeKey
 } from "../logic/notifier.js";
 import { cascadeFixture, eventFixture, NOW } from "./helpers.js";
 
@@ -151,6 +152,79 @@ describe("notifier", () => {
       expect(body.text).toContain("region:");
       expect(body.text).toContain("cascade_stage:");
       expect(body.text).toContain("stale_gate_result:");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("suppresses persisted live duplicates without calling Slack again", async () => {
+    const originalFetch = globalThis.fetch;
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ ok: true })));
+    globalThis.fetch = fetchMock as typeof fetch;
+    const event = eventFixture();
+    const state = cascadeFixture();
+    const payload = buildAlertPayload(event, state, false);
+
+    try {
+      const notifier = new DryRunNotifier({
+        dryRun: false,
+        slackBotToken: "xoxb-test-token",
+        slackChannelId: "C0AS8NB0LQY",
+        suppressDuplicateHours: 24,
+        now: NOW
+      });
+      const result = await notifier.notify(event, state, [
+        {
+          id: "notification-1",
+          cascadeStateId: state.id,
+          sentAt: new Date(NOW.getTime() - 60_000),
+          channel: "slack_bot",
+          title: payload.title,
+          body: payload.body,
+          dedupeKey: notificationDedupeKey(payload, state)
+        }
+      ]);
+
+      expect(result.sent).toBe(false);
+      expect(result.suppressed).toBe(true);
+      expect(result.reason).toBe("persistent_duplicate");
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("does not let dry-run records suppress the first live Slack send", async () => {
+    const originalFetch = globalThis.fetch;
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ ok: true, ts: "1770000000.000000" })));
+    globalThis.fetch = fetchMock as typeof fetch;
+    const event = eventFixture();
+    const state = cascadeFixture();
+    const payload = buildAlertPayload(event, state, false);
+
+    try {
+      const notifier = new DryRunNotifier({
+        dryRun: false,
+        slackBotToken: "xoxb-test-token",
+        slackChannelId: "C0AS8NB0LQY",
+        suppressDuplicateHours: 24,
+        now: NOW
+      });
+      const result = await notifier.notify(event, state, [
+        {
+          id: "notification-1",
+          cascadeStateId: state.id,
+          sentAt: new Date(NOW.getTime() - 60_000),
+          channel: "dry_run",
+          title: payload.title,
+          body: payload.body,
+          dedupeKey: notificationDedupeKey(payload, state)
+        }
+      ]);
+
+      expect(result.sent).toBe(true);
+      expect(result.channel).toBe("slack_bot");
+      expect(fetchMock).toHaveBeenCalledTimes(1);
     } finally {
       globalThis.fetch = originalFetch;
     }

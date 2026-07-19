@@ -54,4 +54,29 @@ describe("repository", () => {
 
     expect(await repo.listNotifications()).toHaveLength(1);
   });
+
+  it("upgrades a dry-run notification record to the first live channel", async () => {
+    const repo = new InMemoryWatcherRepository();
+    const base = {
+      id: "notification-1",
+      cascadeStateId: "cascade-1",
+      sentAt: new Date("2026-07-08T12:00:00.000Z"),
+      title: "GEOSPACE WATCH: S3 escalation",
+      body: "required fields present",
+      dedupeKey: "CASCADE_VOLCANOES_RAINIER:us7000test:S3"
+    };
+
+    await repo.saveNotification({ ...base, channel: "dry_run" });
+    await repo.saveNotification({
+      ...base,
+      id: "notification-2",
+      sentAt: new Date("2026-07-08T12:15:00.000Z"),
+      channel: "slack_bot"
+    });
+
+    const notifications = await repo.listNotifications();
+    expect(notifications).toHaveLength(1);
+    expect(notifications[0].channel).toBe("slack_bot");
+    expect(notifications[0].id).toBe("notification-2");
+  });
 });

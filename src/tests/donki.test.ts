@@ -1,6 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createSpaceWeatherWindow } from "../logic/cascade.js";
-import { normalizeDonkiEvent } from "../sources/donki.js";
+import { fetchDonkiEvents, normalizeDonkiEvent } from "../sources/donki.js";
 import { NOW } from "./helpers.js";
 
 describe("DONKI ingestion", () => {
@@ -52,5 +52,36 @@ describe("DONKI ingestion", () => {
 
     expect(event.severity).toBe("M6.1");
     expect(createSpaceWeatherWindow(event)).toBeDefined();
+  });
+
+  it("retries transient DONKI 5xx responses before giving up on an endpoint", async () => {
+    const originalFetch = globalThis.fetch;
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response("temporary", { status: 503, statusText: "Service Unavailable" }))
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify([
+            {
+              activityID: "2026-07-08T00:00:00-CME-001",
+              startTime: "2026-07-08T00:00Z",
+              submissionTime: "2026-07-08T01:00Z",
+              link: "https://kauai.ccmc.gsfc.nasa.gov/DONKI/view/CME/1"
+            }
+          ]),
+          { status: 200, headers: { "content-type": "application/json" } }
+        )
+      );
+    globalThis.fetch = fetchMock as typeof fetch;
+
+    try {
+      const events = await fetchDonkiEvents("test-key", NOW, ["CME"]);
+
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(events).toHaveLength(1);
+      expect(events[0].source).toBe("nasa_donki");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 });

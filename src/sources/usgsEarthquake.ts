@@ -43,7 +43,31 @@ export async function fetchUsgsEarthquakeFeed(
   return data.features.map((feature) => normalizeUsgsEarthquakeFeature(feature, now));
 }
 
-export function normalizeUsgsEarthquakeFeature(feature: UsgsFeature, ingestTime = new Date()): NormalizedEvent {
+export async function fetchUsgsEarthquakeBackfill(
+  params: {
+    startTime: Date;
+    endTime: Date;
+    minLat?: number;
+    maxLat?: number;
+    minLon?: number;
+    maxLon?: number;
+    minMagnitude?: number;
+  },
+  now = new Date()
+): Promise<NormalizedEvent[]> {
+  const response = await fetch(usgsFdsnQueryUrl(params), { cache: "no-store" });
+  if (!response.ok) {
+    throw new Error(`USGS FDSN backfill failed: ${response.status} ${response.statusText}`);
+  }
+  const data = (await response.json()) as UsgsCollection;
+  return data.features.map((feature) => normalizeUsgsEarthquakeFeature(feature, now, "usgs_fdsn_backfill"));
+}
+
+export function normalizeUsgsEarthquakeFeature(
+  feature: UsgsFeature,
+  ingestTime = new Date(),
+  source: "usgs_earthquake_geojson" | "usgs_fdsn_backfill" = "usgs_earthquake_geojson"
+): NormalizedEvent {
   if (!feature.geometry) {
     throw new Error(`USGS feature ${feature.id} missing geometry`);
   }
@@ -53,8 +77,8 @@ export function normalizeUsgsEarthquakeFeature(feature: UsgsFeature, ingestTime 
   const title = feature.properties.title ?? `${feature.properties.mag ?? "M?"} - ${feature.properties.place ?? "Unknown"}`;
 
   return {
-    id: stableId("usgs_earthquake_geojson", feature.id),
-    source: "usgs_earthquake_geojson",
+    id: stableId(source, feature.id),
+    source,
     externalId: feature.id,
     eventType: "earthquake",
     title,
@@ -83,6 +107,8 @@ export function usgsFdsnQueryUrl(params: {
 }): string {
   const query = new URLSearchParams({
     format: "geojson",
+    eventtype: "earthquake",
+    orderby: "time",
     starttime: params.startTime.toISOString(),
     endtime: params.endTime.toISOString()
   });

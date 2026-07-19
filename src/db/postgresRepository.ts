@@ -5,6 +5,7 @@ import type {
   EventType,
   NormalizedEvent,
   NotificationRecord,
+  RegionBaseline,
   RegionId,
   SourceRun,
   WatchWindow
@@ -64,6 +65,15 @@ interface NotificationRow {
   title: string;
   body: string;
   dedupe_key: string;
+}
+
+interface RegionBaselineRow {
+  region: RegionId;
+  metric: "earthquakes_count_24h";
+  window_days: number;
+  computed_at: Date;
+  value: number;
+  sample_count: number;
 }
 
 interface SourceRunRow {
@@ -261,7 +271,14 @@ export class PostgresWatcherRepository implements WatcherRepository {
     await this.pool.query(
       `INSERT INTO notifications (id, cascade_state_id, sent_at, channel, title, body, dedupe_key)
        VALUES ($1, $2, $3, $4, $5, $6, $7)
-       ON CONFLICT (dedupe_key) DO NOTHING`,
+       ON CONFLICT (dedupe_key) DO UPDATE
+       SET id = EXCLUDED.id,
+           cascade_state_id = EXCLUDED.cascade_state_id,
+           sent_at = EXCLUDED.sent_at,
+           channel = EXCLUDED.channel,
+           title = EXCLUDED.title,
+           body = EXCLUDED.body
+       WHERE notifications.channel = 'dry_run' AND EXCLUDED.channel <> 'dry_run'`,
       [
         notification.id,
         notification.cascadeStateId,
@@ -278,6 +295,33 @@ export class PostgresWatcherRepository implements WatcherRepository {
     return rows(await this.pool.query<NotificationRow>(`SELECT * FROM notifications ORDER BY sent_at DESC`)).map(
       notificationFromRow
     );
+  }
+
+  async saveRegionBaseline(baseline: RegionBaseline): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO region_baselines (region, metric, window_days, computed_at, value, sample_count)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (region, metric, window_days) DO UPDATE
+       SET computed_at = EXCLUDED.computed_at,
+           value = EXCLUDED.value,
+           sample_count = EXCLUDED.sample_count`,
+      [
+        baseline.region,
+        baseline.metric,
+        baseline.windowDays,
+        baseline.computedAt,
+        baseline.value,
+        baseline.sampleCount
+      ]
+    );
+  }
+
+  async listRegionBaselines(): Promise<RegionBaseline[]> {
+    return rows(
+      await this.pool.query<RegionBaselineRow>(
+        `SELECT * FROM region_baselines ORDER BY region ASC, metric ASC, window_days ASC`
+      )
+    ).map(regionBaselineFromRow);
   }
 }
 
@@ -356,6 +400,17 @@ function notificationFromRow(row: NotificationRow): NotificationRecord {
     title: row.title,
     body: row.body,
     dedupeKey: row.dedupe_key
+  };
+}
+
+function regionBaselineFromRow(row: RegionBaselineRow): RegionBaseline {
+  return {
+    region: row.region,
+    metric: row.metric,
+    windowDays: row.window_days,
+    computedAt: row.computed_at,
+    value: Number(row.value),
+    sampleCount: row.sample_count
   };
 }
 

@@ -62,12 +62,14 @@ export function createWatcherServer() {
 }
 
 async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
-  if (req.url === "/healthz") {
+  const pathname = new URL(req.url ?? "/", "http://localhost").pathname.replace(/\/+$/, "") || "/";
+
+  if (pathname === "/" || pathname === "/healthz") {
     writeJson(res, 200, { ok: true, dryRun: config.dryRun });
     return;
   }
 
-  if (req.url === "/run") {
+  if (pathname === "/run") {
     await handleRun(req, res);
     return;
   }

@@ -1,15 +1,16 @@
 import { loadConfig } from "./config.js";
 import { createRepository } from "./db/createRepository.js";
 import { InMemoryWatcherRepository, type WatcherRepository } from "./db/repository.js";
+import { compareRegionalRate } from "./logic/baseline.js";
 import { evaluateCascade } from "./logic/cascade.js";
-import { DryRunNotifier } from "./logic/notifier.js";
+import { DryRunNotifier, notificationDedupeKey } from "./logic/notifier.js";
 import { WatcherScheduler } from "./scheduler.js";
 import { fetchDonkiEvents } from "./sources/donki.js";
 import { fetchSwpcKp } from "./sources/swpc.js";
 import { fetchTsunamiFeed } from "./sources/tsunami.js";
 import { fetchUsgsEarthquakeFeed } from "./sources/usgsEarthquake.js";
 import { fetchHansElevatedVolcanoes } from "./sources/usgsHans.js";
-import type { NormalizedEvent } from "./types.js";
+import type { NormalizedEvent, NotificationRecord, RegionBaseline, RegionId, WatchWindow } from "./types.js";
 
 export async function runOnce(now = new Date(), repo: WatcherRepository = new InMemoryWatcherRepository()): Promise<void> {
   const config = loadConfig();
@@ -59,7 +60,7 @@ export async function runOnce(now = new Date(), repo: WatcherRepository = new In
     events.push((await repo.upsertEvent(event)).event);
   }
 
-  const windows = [];
+  const currentWindows: WatchWindow[] = [];
   for (const event of events) {
     const state = evaluateCascade({ event, now, config });
     await repo.saveCascadeState(state);
@@ -75,23 +76,36 @@ export async function runOnce(now = new Date(), repo: WatcherRepository = new In
       active: true
     };
     await repo.saveWatchWindow(window);
-    windows.push(window);
+    currentWindows.push(window);
   }
 
+  const windows = await activeWatchWindows(repo, currentWindows, now);
+  const baselines = await repo.listRegionBaselines();
+  const tsunamiStatus = highestTsunamiStatus(events);
+  const previousNotifications = await repo.listNotifications();
   for (const event of events) {
-    const state = evaluateCascade({ event, activeWindows: windows, now, config, tsunamiStatus: "none" });
+    const state = evaluateCascade({
+      event,
+      activeWindows: windows,
+      baseline: baselineForEvent(event, events, baselines, now),
+      now,
+      config,
+      tsunamiStatus
+    });
     await repo.saveCascadeState(state);
-    const result = await notifier.notify(event, state);
-    if (result.payload) {
-      await repo.saveNotification({
+    const result = await notifier.notify(event, state, previousNotifications);
+    if (result.payload && !result.suppressed) {
+      const notification: NotificationRecord = {
         id: `notification:${result.payload.dedupeKey}:${state.stage}`,
         cascadeStateId: state.id,
         sentAt: new Date(),
         channel: result.channel ?? (result.dryRun ? "dry_run" : "webhook"),
         title: result.payload.title,
         body: result.payload.body,
-        dedupeKey: `${result.payload.dedupeKey}:${state.stage}`
-      });
+        dedupeKey: notificationDedupeKey(result.payload, state)
+      };
+      await repo.saveNotification(notification);
+      previousNotifications.unshift(notification);
       console.log(JSON.stringify(result, null, 2));
     }
   }
@@ -99,6 +113,80 @@ export async function runOnce(now = new Date(), repo: WatcherRepository = new In
   for (const failed of batches.filter((batch) => batch.status === "rejected")) {
     console.error((failed as PromiseRejectedResult).reason);
   }
+}
+
+async function activeWatchWindows(
+  repo: WatcherRepository,
+  currentWindows: WatchWindow[],
+  now: Date
+): Promise<WatchWindow[]> {
+  const windowsById = new Map<string, WatchWindow>();
+  for (const window of await repo.listWatchWindows()) {
+    windowsById.set(window.id, window);
+  }
+  for (const window of currentWindows) {
+    windowsById.set(window.id, window);
+  }
+
+  const active: WatchWindow[] = [];
+  for (const window of windowsById.values()) {
+    if (window.active && window.endsAt > now) {
+      active.push(window);
+      continue;
+    }
+    if (window.active) {
+      await repo.saveWatchWindow({ ...window, active: false });
+    }
+  }
+  return active;
+}
+
+function baselineForEvent(
+  event: NormalizedEvent,
+  events: NormalizedEvent[],
+  baselines: RegionBaseline[],
+  now: Date
+) {
+  if (event.eventType !== "earthquake" || !event.region) {
+    return undefined;
+  }
+
+  const baseline = bestBaselineForRegion(event.region, baselines);
+  if (!baseline) {
+    return undefined;
+  }
+
+  return compareRegionalRate(event.region, events, baseline.value, now);
+}
+
+function bestBaselineForRegion(region: RegionId, baselines: RegionBaseline[]): RegionBaseline | undefined {
+  return baselines
+    .filter((baseline) => baseline.region === region && baseline.metric === "earthquakes_count_24h")
+    .sort((a, b) => b.windowDays - a.windowDays)[0];
+}
+
+function highestTsunamiStatus(events: NormalizedEvent[]): "none" | "statement" | "watch" | "advisory" | "warning" {
+  const rank = { none: 0, statement: 1, watch: 2, advisory: 3, warning: 4 } as const;
+  let highest: keyof typeof rank = "none";
+
+  for (const event of events) {
+    if (event.eventType !== "tsunami") {
+      continue;
+    }
+    const severity = (event.severity ?? event.title).toLowerCase();
+    const status = severity.includes("warning")
+      ? "warning"
+      : severity.includes("advisory")
+        ? "advisory"
+        : severity.includes("watch")
+          ? "watch"
+          : "statement";
+    if (rank[status] > rank[highest]) {
+      highest = status;
+    }
+  }
+
+  return highest;
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

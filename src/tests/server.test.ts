@@ -25,6 +25,18 @@ describe("watcher HTTP server", () => {
     }
   });
 
+  it("returns health for root and normalized health probe paths", async () => {
+    const { url, close } = await listen();
+
+    try {
+      await expect(fetch(`${url}/`).then((response) => response.status)).resolves.toBe(200);
+      await expect(fetch(`${url}/healthz/`).then((response) => response.status)).resolves.toBe(200);
+      await expect(fetch(`${url}/healthz?source=probe`).then((response) => response.status)).resolves.toBe(200);
+    } finally {
+      await close();
+    }
+  });
+
   it("rejects /run when scheduler secret is unset", async () => {
     delete process.env.SCHEDULER_SHARED_SECRET;
     const { url, close } = await listen();

@@ -6,9 +6,11 @@
   "scripts": {
     "dev": "tsx src/server.ts",
     "dev:once": "tsx src/worker.ts",
+    "backfill": "tsx src/backfill.ts",
     "start": "node dist/server.js",
     "start:once": "node dist/worker.js",
     "start:loop": "node dist/worker.js --loop",
+    "start:backfill": "node dist/backfill.js",
     "migrate": "tsx src/db/migrate.ts",
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
