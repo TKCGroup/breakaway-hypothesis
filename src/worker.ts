@@ -16,6 +16,8 @@ export async function runOnce(now = new Date(), repo: WatcherRepository = new In
   const notifier = new DryRunNotifier({
     dryRun: config.dryRun,
     webhookUrl: config.notifyWebhookUrl,
+    slackBotToken: config.slackBotToken,
+    slackChannelId: config.slackChannelId,
     suppressDuplicateHours: config.notifier.suppressDuplicateHours,
     now
   });
@@ -85,7 +87,7 @@ export async function runOnce(now = new Date(), repo: WatcherRepository = new In
         id: `notification:${result.payload.dedupeKey}:${state.stage}`,
         cascadeStateId: state.id,
         sentAt: new Date(),
-        channel: result.dryRun ? "dry_run" : "webhook",
+        channel: result.channel ?? (result.dryRun ? "dry_run" : "webhook"),
         title: result.payload.title,
         body: result.payload.body,
         dedupeKey: `${result.payload.dedupeKey}:${state.stage}`

@@ -7,7 +7,7 @@ Recommended shape:
 - Cloud Run service runs the HTTP watcher entrypoint.
 - Cloud Scheduler sends authenticated `POST /run` every 15 minutes.
 - Cloud SQL for PostgreSQL stores events, source runs, windows, cascade states, and notifications.
-- Secret Manager stores `DATABASE_URL`, `NASA_API_KEY`, optional `NOTIFY_WEBHOOK_URL`, and `SCHEDULER_SHARED_SECRET`.
+- Secret Manager stores `DATABASE_URL`, `NASA_API_KEY`, optional Slack notification credentials, and `SCHEDULER_SHARED_SECRET`.
 
 ## Service
 
@@ -42,7 +42,14 @@ Altbot provisioned the core backend:
 - `NASA_API_KEY`: Secret Manager `NASA_API_KEY`
 - `SCHEDULER_SHARED_SECRET`: Secret Manager `BREAKAWAY_SCHEDULER_SHARED_SECRET`
 
-`NOTIFY_WEBHOOK_URL` is not provisioned yet. Tyler must provide a Slack incoming webhook, then create `BREAKAWAY_NOTIFY_WEBHOOK_URL` and grant `swarm-agent@altbot-486317.iam.gserviceaccount.com` `roles/secretmanager.secretAccessor`.
+Notifications can reuse Altbot's existing Slack app instead of a new incoming webhook:
+
+- Slack workspace: TKC Group (`T04S9TGHV`)
+- Bot secret: `SLACK_BOT_TOKEN`
+- Channel: `#world-alerts` (`C0AS8NB0LQY`)
+- Cloud Run env: `SLACK_CHANNEL_ID=C0AS8NB0LQY`
+
+`NOTIFY_WEBHOOK_URL` remains supported as a fallback, but is not needed when `SLACK_BOT_TOKEN` and `SLACK_CHANNEL_ID` are configured.
 
 Deploy v1 from a machine authenticated as `tkc-v7-dev@altbot-486317.iam.gserviceaccount.com`:
 
@@ -54,8 +61,8 @@ gcloud run deploy breakaway-hypothesis-watcher \
   --service-account swarm-agent@altbot-486317.iam.gserviceaccount.com \
   --add-cloudsql-instances altbot-486317:us-central1:altbot-depot \
   --no-allow-unauthenticated \
-  --set-secrets DATABASE_URL=BREAKAWAY_DATABASE_URL:latest,NASA_API_KEY=NASA_API_KEY:latest,SCHEDULER_SHARED_SECRET=BREAKAWAY_SCHEDULER_SHARED_SECRET:latest \
-  --update-env-vars DRY_RUN=true,RUN_MIGRATIONS_ON_START=true,NODE_ENV=production
+  --set-secrets DATABASE_URL=BREAKAWAY_DATABASE_URL:latest,NASA_API_KEY=NASA_API_KEY:latest,SCHEDULER_SHARED_SECRET=BREAKAWAY_SCHEDULER_SHARED_SECRET:latest,SLACK_BOT_TOKEN=SLACK_BOT_TOKEN:latest \
+  --update-env-vars DRY_RUN=true,RUN_MIGRATIONS_ON_START=true,NODE_ENV=production,SLACK_CHANNEL_ID=C0AS8NB0LQY
 ```
 
 For later redeploys prefer `--update-env-vars` / `--update-secrets`. Avoid `--set-*` on updates unless intentionally replacing the full set.

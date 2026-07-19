@@ -60,7 +60,7 @@ interface NotificationRow {
   id: string;
   cascade_state_id: string;
   sent_at: Date;
-  channel: "dry_run" | "webhook";
+  channel: "dry_run" | "webhook" | "slack_bot";
   title: string;
   body: string;
   dedupe_key: string;

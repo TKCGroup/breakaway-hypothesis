@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import { DryRunNotifier, buildAlertPayload, buildSlackWebhookPayload } from "../logic/notifier.js";
+import {
+  DryRunNotifier,
+  buildAlertPayload,
+  buildSlackBotPostPayload,
+  buildSlackWebhookPayload
+} from "../logic/notifier.js";
 import { cascadeFixture, eventFixture, NOW } from "./helpers.js";
 
 describe("notifier", () => {
@@ -36,6 +41,19 @@ describe("notifier", () => {
     expect(webhookPayload.text).toContain("region: PNW_CASCADIA_OFFSHORE");
     expect(webhookPayload.text).toContain("cascade_stage: S5");
     expect(webhookPayload.text).toContain("stale_gate_result: passed");
+  });
+
+  it("formats Slack bot post payloads for the world-alerts channel", () => {
+    const event = eventFixture({ region: "PNW_CASCADIA_OFFSHORE", magnitude: 5.5 });
+    const state = cascadeFixture({ region: "PNW_CASCADIA_OFFSHORE", stage: "S5" });
+    const payload = buildAlertPayload(event, state, false);
+    const botPayload = buildSlackBotPostPayload(payload, "C0AS8NB0LQY");
+
+    expect(botPayload.channel).toBe("C0AS8NB0LQY");
+    expect(botPayload.unfurl_links).toBe(false);
+    expect(botPayload.text).toContain("GEOSPACE WATCH: S5");
+    expect(botPayload.text).toContain("source: usgs_earthquake_geojson");
+    expect(botPayload.text).toContain("stale_gate_result: passed");
   });
 
   it("suppresses duplicate notification for same stage/region/event", async () => {
@@ -85,7 +103,47 @@ describe("notifier", () => {
       const body = JSON.parse(init.body as string) as { text: string };
 
       expect(result.sent).toBe(true);
+      expect(result.channel).toBe("webhook");
       expect(body.text).toContain("GEOSPACE WATCH");
+      expect(body.text).toContain("source: usgs_earthquake_geojson");
+      expect(body.text).toContain("event_time:");
+      expect(body.text).toContain("source_updated_at:");
+      expect(body.text).toContain("ingest_time:");
+      expect(body.text).toContain("region:");
+      expect(body.text).toContain("cascade_stage:");
+      expect(body.text).toContain("stale_gate_result:");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("posts through Slack chat.postMessage when bot token and channel are configured", async () => {
+    const originalFetch = globalThis.fetch;
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ ok: true, ts: "1770000000.000000" })));
+    globalThis.fetch = fetchMock as typeof fetch;
+
+    try {
+      const notifier = new DryRunNotifier({
+        dryRun: false,
+        slackBotToken: "xoxb-test-token",
+        slackChannelId: "C0AS8NB0LQY",
+        suppressDuplicateHours: 24,
+        now: NOW
+      });
+      const result = await notifier.notify(eventFixture(), cascadeFixture());
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+      const body = JSON.parse(init.body as string) as { channel: string; text: string; unfurl_links: boolean };
+
+      expect(url).toBe("https://slack.com/api/chat.postMessage");
+      expect(init.headers).toMatchObject({
+        authorization: "Bearer xoxb-test-token",
+        "content-type": "application/json"
+      });
+      expect(result.sent).toBe(true);
+      expect(result.channel).toBe("slack_bot");
+      expect(body.channel).toBe("C0AS8NB0LQY");
+      expect(body.unfurl_links).toBe(false);
       expect(body.text).toContain("source: usgs_earthquake_geojson");
       expect(body.text).toContain("event_time:");
       expect(body.text).toContain("source_updated_at:");

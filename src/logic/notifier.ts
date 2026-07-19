@@ -4,10 +4,16 @@ export interface SlackWebhookPayload {
   text: string;
 }
 
+export interface SlackBotPostPayload extends SlackWebhookPayload {
+  channel: string;
+  unfurl_links: false;
+}
+
 export interface NotificationResult {
   sent: boolean;
   suppressed: boolean;
   dryRun: boolean;
+  channel?: "dry_run" | "webhook" | "slack_bot";
   payload?: AlertPayload;
   reason?: string;
 }
@@ -15,6 +21,8 @@ export interface NotificationResult {
 export interface NotifierOptions {
   dryRun: boolean;
   webhookUrl?: string;
+  slackBotToken?: string;
+  slackChannelId?: string;
   suppressDuplicateHours: number;
   now?: Date;
 }
@@ -49,23 +57,69 @@ export class DryRunNotifier {
     this.sent.set(payload.dedupeKey, { stageRank: currentRank, sentAt: now });
 
     if (this.options.dryRun) {
-      return { sent: false, suppressed: false, dryRun: true, payload, reason: "dry_run" };
+      return { sent: false, suppressed: false, dryRun: true, channel: "dry_run", payload, reason: "dry_run" };
     }
 
-    if (!this.options.webhookUrl) {
-      throw new Error("NOTIFY_WEBHOOK_URL is required when DRY_RUN=false");
+    if (this.options.slackBotToken && this.options.slackChannelId) {
+      const response = await fetch("https://slack.com/api/chat.postMessage", {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${this.options.slackBotToken}`,
+          "content-type": "application/json"
+        },
+        body: JSON.stringify(buildSlackBotPostPayload(payload, this.options.slackChannelId))
+      });
+      if (!response.ok) {
+        throw new Error(`Slack bot notification failed: ${response.status} ${response.statusText}`);
+      }
+      const slackResult = (await response.json().catch(() => ({}))) as { ok?: boolean; error?: string };
+      if (!slackResult.ok) {
+        throw new Error(`Slack bot notification failed: ${slackResult.error ?? "unknown_error"}`);
+      }
+      return { sent: true, suppressed: false, dryRun: false, channel: "slack_bot", payload };
     }
 
-    const response = await fetch(this.options.webhookUrl, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(buildSlackWebhookPayload(payload))
-    });
-    if (!response.ok) {
-      throw new Error(`Notification webhook failed: ${response.status} ${response.statusText}`);
+    if (this.options.webhookUrl) {
+      const response = await fetch(this.options.webhookUrl, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(buildSlackWebhookPayload(payload))
+      });
+      if (!response.ok) {
+        throw new Error(`Notification webhook failed: ${response.status} ${response.statusText}`);
+      }
+      return { sent: true, suppressed: false, dryRun: false, channel: "webhook", payload };
     }
-    return { sent: true, suppressed: false, dryRun: false, payload };
+
+    throw new Error(
+      "SLACK_BOT_TOKEN and SLACK_CHANNEL_ID, or NOTIFY_WEBHOOK_URL, are required when DRY_RUN=false"
+    );
   }
+}
+
+export function buildSlackBotPostPayload(payload: AlertPayload, channel: string): SlackBotPostPayload {
+  return {
+    ...buildSlackWebhookPayload(payload),
+    channel,
+    unfurl_links: false
+  };
+}
+
+export function buildSlackWebhookPayload(payload: AlertPayload): SlackWebhookPayload {
+  const required = payload.requiredFields;
+  const requiredFields = [
+    `source: ${required.source}`,
+    `event_time: ${required.event_time}`,
+    `source_updated_at: ${required.source_updated_at}`,
+    `ingest_time: ${required.ingest_time}`,
+    `region: ${required.region}`,
+    `cascade_stage: ${required.cascade_stage}`,
+    `stale_gate_result: ${required.stale_gate_result}`
+  ].join("\n");
+
+  return {
+    text: `${payload.dryRun ? "[DRY RUN] " : ""}${payload.title}\n\n${payload.body}\n\nRequired fields:\n${requiredFields}`
+  };
 }
 
 export function buildAlertPayload(event: NormalizedEvent, state: CascadeState, dryRun: boolean): AlertPayload {
@@ -99,23 +153,6 @@ export function buildAlertPayload(event: NormalizedEvent, state: CascadeState, d
       cascade_stage: state.stage,
       stale_gate_result: staleGateResult
     }
-  };
-}
-
-export function buildSlackWebhookPayload(payload: AlertPayload): SlackWebhookPayload {
-  const required = payload.requiredFields;
-  const requiredFields = [
-    `source: ${required.source}`,
-    `event_time: ${required.event_time}`,
-    `source_updated_at: ${required.source_updated_at}`,
-    `ingest_time: ${required.ingest_time}`,
-    `region: ${required.region}`,
-    `cascade_stage: ${required.cascade_stage}`,
-    `stale_gate_result: ${required.stale_gate_result}`
-  ].join("\n");
-
-  return {
-    text: `${payload.dryRun ? "[DRY RUN] " : ""}${payload.title}\n\n${payload.body}\n\nRequired fields:\n${requiredFields}`
   };
 }
 

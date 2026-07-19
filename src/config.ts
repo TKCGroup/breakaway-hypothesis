@@ -23,6 +23,8 @@ export interface WatcherConfig {
   pollIntervalMinutes: number;
   nasaApiKey?: string;
   notifyWebhookUrl?: string;
+  slackBotToken?: string;
+  slackChannelId?: string;
   freshness: {
     maxEventAgeHours: number;
     sourceStaleHours: Record<OfficialSource, number>;
@@ -202,6 +204,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): WatcherConfig 
     pollIntervalMinutes: Number(env.POLL_INTERVAL_MINUTES ?? DEFAULT_CONFIG.pollIntervalMinutes),
     nasaApiKey: env.NASA_API_KEY,
     notifyWebhookUrl: env.NOTIFY_WEBHOOK_URL,
+    slackBotToken: env.SLACK_BOT_TOKEN,
+    slackChannelId: env.SLACK_CHANNEL_ID,
     freshness: {
       ...DEFAULT_CONFIG.freshness,
       maxEventAgeHours: Number(env.MAX_EVENT_AGE_HOURS ?? DEFAULT_CONFIG.freshness.maxEventAgeHours)

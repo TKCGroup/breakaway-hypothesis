@@ -10,7 +10,7 @@ This is a research/monitoring system, not an earthquake prediction engine. Space
 - Every notification passes `evaluateStaleGate` first.
 - Every notification includes official source, `event_time`, `source_updated_at`, `ingest_time`, region, cascade stage, and stale-gate result.
 - `DRY_RUN=true` is the default.
-- Live notifications require `DRY_RUN=false`, `NOTIFY_WEBHOOK_URL`, and passing tests.
+- Live notifications require `DRY_RUN=false`, either `SLACK_BOT_TOKEN` + `SLACK_CHANNEL_ID` or `NOTIFY_WEBHOOK_URL`, and passing tests.
 
 ## Commands
 
@@ -52,6 +52,8 @@ Deployment scaffolding lives in `deploy/` and targets the Altbot GCP project `al
 DATABASE_URL=
 NASA_API_KEY=
 NOTIFY_WEBHOOK_URL=
+SLACK_BOT_TOKEN=
+SLACK_CHANNEL_ID=
 POLL_INTERVAL_MINUTES=15
 MAX_EVENT_AGE_HOURS=12
 SPACE_WEATHER_WINDOW_HOURS=72

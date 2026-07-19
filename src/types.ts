@@ -121,7 +121,7 @@ export interface NotificationRecord {
   id: string;
   cascadeStateId: string;
   sentAt: Date;
-  channel: "dry_run" | "webhook";
+  channel: "dry_run" | "webhook" | "slack_bot";
   title: string;
   body: string;
   dedupeKey: string;
