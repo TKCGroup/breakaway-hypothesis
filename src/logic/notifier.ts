@@ -1,5 +1,9 @@
 import type { AlertPayload, CascadeState, NormalizedEvent } from "../types.js";
 
+export interface SlackWebhookPayload {
+  text: string;
+}
+
 export interface NotificationResult {
   sent: boolean;
   suppressed: boolean;
@@ -55,7 +59,7 @@ export class DryRunNotifier {
     const response = await fetch(this.options.webhookUrl, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify(payload)
+      body: JSON.stringify(buildSlackWebhookPayload(payload))
     });
     if (!response.ok) {
       throw new Error(`Notification webhook failed: ${response.status} ${response.statusText}`);
@@ -95,6 +99,23 @@ export function buildAlertPayload(event: NormalizedEvent, state: CascadeState, d
       cascade_stage: state.stage,
       stale_gate_result: staleGateResult
     }
+  };
+}
+
+export function buildSlackWebhookPayload(payload: AlertPayload): SlackWebhookPayload {
+  const required = payload.requiredFields;
+  const requiredFields = [
+    `source: ${required.source}`,
+    `event_time: ${required.event_time}`,
+    `source_updated_at: ${required.source_updated_at}`,
+    `ingest_time: ${required.ingest_time}`,
+    `region: ${required.region}`,
+    `cascade_stage: ${required.cascade_stage}`,
+    `stale_gate_result: ${required.stale_gate_result}`
+  ].join("\n");
+
+  return {
+    text: `${payload.dryRun ? "[DRY RUN] " : ""}${payload.title}\n\n${payload.body}\n\nRequired fields:\n${requiredFields}`
   };
 }
 

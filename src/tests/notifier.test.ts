@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { DryRunNotifier, buildAlertPayload } from "../logic/notifier.js";
+import { describe, expect, it, vi } from "vitest";
+import { DryRunNotifier, buildAlertPayload, buildSlackWebhookPayload } from "../logic/notifier.js";
 import { cascadeFixture, eventFixture, NOW } from "./helpers.js";
 
 describe("notifier", () => {
@@ -20,6 +20,22 @@ describe("notifier", () => {
     expect(payload.requiredFields.cascade_stage).toBe("S5");
     expect(payload.requiredFields.stale_gate_result).toBe("passed");
     expect(payload.body).toContain("tsunami feed status=none");
+  });
+
+  it("formats the outbound webhook body for Slack with all required alert fields", () => {
+    const event = eventFixture({ region: "PNW_CASCADIA_OFFSHORE", magnitude: 5.5 });
+    const state = cascadeFixture({ region: "PNW_CASCADIA_OFFSHORE", stage: "S5" });
+    const payload = buildAlertPayload(event, state, false);
+    const webhookPayload = buildSlackWebhookPayload(payload);
+
+    expect(webhookPayload.text).toContain("GEOSPACE WATCH: S5");
+    expect(webhookPayload.text).toContain("source: usgs_earthquake_geojson");
+    expect(webhookPayload.text).toContain(`event_time: ${event.eventTime.toISOString()}`);
+    expect(webhookPayload.text).toContain(`source_updated_at: ${event.sourceUpdatedAt.toISOString()}`);
+    expect(webhookPayload.text).toContain(`ingest_time: ${event.ingestTime.toISOString()}`);
+    expect(webhookPayload.text).toContain("region: PNW_CASCADIA_OFFSHORE");
+    expect(webhookPayload.text).toContain("cascade_stage: S5");
+    expect(webhookPayload.text).toContain("stale_gate_result: passed");
   });
 
   it("suppresses duplicate notification for same stage/region/event", async () => {
@@ -49,5 +65,36 @@ describe("notifier", () => {
 
     expect(higherStage.suppressed).toBe(false);
     expect(newEvent.suppressed).toBe(false);
+  });
+
+  it("posts a Slack-compatible webhook body when dry-run is disabled", async () => {
+    const originalFetch = globalThis.fetch;
+    const fetchMock = vi.fn(async () => new Response("ok", { status: 200 }));
+    globalThis.fetch = fetchMock as typeof fetch;
+
+    try {
+      const notifier = new DryRunNotifier({
+        dryRun: false,
+        webhookUrl: "https://hooks.slack.test/services/T/B/C",
+        suppressDuplicateHours: 24,
+        now: NOW
+      });
+      const result = await notifier.notify(eventFixture(), cascadeFixture());
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+      const body = JSON.parse(init.body as string) as { text: string };
+
+      expect(result.sent).toBe(true);
+      expect(body.text).toContain("GEOSPACE WATCH");
+      expect(body.text).toContain("source: usgs_earthquake_geojson");
+      expect(body.text).toContain("event_time:");
+      expect(body.text).toContain("source_updated_at:");
+      expect(body.text).toContain("ingest_time:");
+      expect(body.text).toContain("region:");
+      expect(body.text).toContain("cascade_stage:");
+      expect(body.text).toContain("stale_gate_result:");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 });
