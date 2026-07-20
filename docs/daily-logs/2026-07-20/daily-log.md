@@ -20,3 +20,17 @@
 ## Notes
 
 - Public `/` and `/healthz/` return health JSON. Exact `/healthz` returns a Google front-end 404 before reaching the app; use `/healthz/` or `/` for external probes.
+
+## False-Positive Correction
+
+- Tyler reported two live Slack alerts that were official and stale-gated but region-wrong:
+  - `us7000t21e`: official USGS event is south of the Kermadec Islands, not Cascadia.
+  - `us7000t21z`: official USGS event is northern Mid-Atlantic Ridge, not Cascadia.
+- Root cause: global USGS earthquakes without a configured region fell through to the cascade fallback region `PNW_CASCADIA_OFFSHORE`.
+- Paused live delivery by setting Cloud Run `DRY_RUN=true`, then pushed:
+  - `257be2b Suppress off-target earthquakes and improve alerts`
+  - `fa8f376 Suppress comparator earthquake alerts`
+- Added regression coverage for both false-positive IDs and comparator-only `us7000t1x5`.
+- Local gates passed after the fix: `pnpm typecheck`, `pnpm test` (50/50), `pnpm build`.
+- Dry-run revision `breakaway-hypothesis-watcher-00008-p4n` passed a forced Scheduler run at `2026-07-20T22:29:57Z` with no dry-run alert payloads and no log hits for the bad IDs.
+- Live revision `breakaway-hypothesis-watcher-00009-7qm` is serving 100% traffic with `DRY_RUN=false`. Forced live Scheduler run at `2026-07-20T22:31:26Z` returned HTTP 200 with no bad-ID/comparator alert logs.

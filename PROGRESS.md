@@ -44,3 +44,17 @@
 - [x] Fix or verify deployed `/healthz`.
 - [x] Complete 30/90-day baseline backfill.
 - [x] Flip live notifications only after Tyler approval.
+
+## Correction Update — 2026-07-20
+
+- False-positive root cause: unmatched global USGS earthquakes with no configured region were falling back to `PNW_CASCADIA_OFFSHORE` inside cascade scoring. This incorrectly promoted official-but-off-target events `us7000t21e` and `us7000t21z` to S5 Slack alerts.
+- Immediate mitigation: Cloud Run was paused with `DRY_RUN=true` before patch deployment.
+- Code fixes pushed:
+  - `257be2b Suppress off-target earthquakes and improve alerts`
+  - `fa8f376 Suppress comparator earthquake alerts`
+- Current pushed code commit: `fa8f376 Suppress comparator earthquake alerts`.
+- Local gates for the fixed code passed: `pnpm typecheck`, `pnpm test` (50/50), `pnpm build`.
+- Dry-run verification revision: `breakaway-hypothesis-watcher-00008-p4n`, 100% traffic. Forced Scheduler run at `2026-07-20T22:29:57Z` returned HTTP 200 and emitted no dry-run notification payloads for `us7000t21e`, `us7000t21z`, or `us7000t1x5`.
+- Live revision after verification: `breakaway-hypothesis-watcher-00009-7qm`, 100% traffic, `DRY_RUN=false`.
+- Live forced Scheduler run at `2026-07-20T22:31:26Z` returned HTTP 200. Logs for revision `00009-7qm` have no hits for `us7000t21e`, `us7000t21z`, `us7000t1x5`, comparator-only alerts, or outside-target alert attempts.
+- Public health verification: `https://breakaway-hypothesis-watcher-479952073196.us-central1.run.app/healthz/` returns `{"ok":true,"dryRun":false}`.

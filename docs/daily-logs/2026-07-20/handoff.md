@@ -25,3 +25,15 @@
 - Exact `/healthz` returns Google front-end 404; `/` and `/healthz/` return `{"ok":true,"dryRun":false}`.
 - Manual live trigger after 22:10 UTC returned 200 and emitted no duplicate stdout alert, consistent with persistent duplicate suppression.
 - Continue watching normal scheduled runs for DONKI transient 5xx noise; retry is now bounded/nonfatal.
+
+## Update — False-Positive Fix
+
+- Supersedes earlier live revision notes: current code commit is `fa8f376 Suppress comparator earthquake alerts`.
+- False positives `us7000t21e` and `us7000t21z` were official USGS events, but not target-region events. The bug was cascade fallback region assignment to `PNW_CASCADIA_OFFSHORE` for unmatched global earthquakes.
+- Live delivery was paused with `DRY_RUN=true`, the fix was deployed and verified in dry-run, then live delivery was re-enabled.
+- Current live Cloud Run revision: `breakaway-hypothesis-watcher-00009-7qm`, 100% traffic, `DRY_RUN=false`.
+- Fixed-code gates passed: `pnpm typecheck`, `pnpm test` (50/50), `pnpm build`.
+- Verification:
+  - Dry-run revision `00008-p4n` forced Scheduler run at `2026-07-20T22:29:57Z`: HTTP 200, no dry-run notification payloads, no hits for `us7000t21e`, `us7000t21z`, or `us7000t1x5`.
+  - Live revision `00009-7qm` forced Scheduler run at `2026-07-20T22:31:26Z`: HTTP 200, no bad-ID/comparator alert logs.
+  - `/healthz/` returns `{"ok":true,"dryRun":false}`.
