@@ -106,7 +106,12 @@ export function evaluateCascade(input: CascadeInput): CascadeState {
       const crossesCount =
         thresholds.swarmCount24h !== undefined ? count24h >= thresholds.swarmCount24h : false;
 
-      if (isM45PlusTarget) {
+      if (isComparatorRegion(input.event.region)) {
+        stage = "S0";
+        reason = "comparator-only earthquake region; stored for baseline comparison";
+        confidence = 0.2;
+        shouldNotify = false;
+      } else if (isM45PlusTarget) {
         stage = "S5";
         reason = `M${magnitude.toFixed(1)} target-region earthquake; tsunami feed status=${input.tsunamiStatus ?? "unknown"}`;
         confidence = 0.9;
@@ -157,6 +162,10 @@ export function evaluateCascade(input: CascadeInput): CascadeState {
 
 function fallbackRegionForState(event: NormalizedEvent): RegionId {
   return event.region ?? "PNW_CASCADIA_OFFSHORE";
+}
+
+function isComparatorRegion(region: RegionId): boolean {
+  return region === "CARIBBEAN_VENEZUELA_COMPARATOR";
 }
 
 function isHansElevated(event: NormalizedEvent): boolean {

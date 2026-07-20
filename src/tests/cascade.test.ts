@@ -120,6 +120,30 @@ describe("cascade", () => {
     }
   });
 
+  it("does not notify from comparator-only earthquake regions", () => {
+    const state = evaluateCascade({
+      event: eventFixture({
+        id: "us7000t1x5",
+        externalId: "us7000t1x5",
+        title: "M 4.8 - 14 km NE of Guiria, Venezuela",
+        eventTime: new Date("2026-07-20T10:55:00.820Z"),
+        sourceUpdatedAt: new Date("2026-07-20T20:40:39.721Z"),
+        ingestTime: new Date("2026-07-20T20:45:11.224Z"),
+        region: "CARIBBEAN_VENEZUELA_COMPARATOR",
+        lat: 10.6707,
+        lon: -62.2023,
+        depthKm: 66,
+        magnitude: 4.8,
+        officialUrl: "https://earthquake.usgs.gov/earthquakes/eventpage/us7000t1x5"
+      }),
+      now: new Date("2026-07-20T22:26:34.000Z")
+    });
+
+    expect(state.stage).toBe("S0");
+    expect(state.shouldNotify).toBe(false);
+    expect(state.reason).toBe("comparator-only earthquake region; stored for baseline comparison");
+  });
+
   it("official HANS elevated volcano immediately promotes to S4", () => {
     const state = evaluateCascade({
       event: eventFixture({
