@@ -51,7 +51,7 @@ export function evaluateCascade(input: CascadeInput): CascadeState {
   const config = input.config ?? DEFAULT_CONFIG;
   const now = input.now ?? new Date();
   const staleGate = evaluateStaleGate(input.event, { config, now });
-  const region = input.event.region ?? inferFallbackRegion(input.event);
+  const region = input.event.region ?? fallbackRegionForState(input.event);
   const activeWindow = input.activeWindows?.find(
     (window) => window.active && window.startedAt <= input.event.eventTime && window.endsAt >= input.event.eventTime
   );
@@ -84,47 +84,54 @@ export function evaluateCascade(input: CascadeInput): CascadeState {
     reason = `USGS HANS elevated volcano status: ${input.event.severity}`;
     confidence = 0.9;
     shouldNotify = true;
-  } else if (input.event.eventType === "earthquake" && region) {
-    const rule = getRegionRule(region, config);
-    const thresholds = rule.alertThresholds;
-    const magnitude = input.event.magnitude ?? 0;
-    const isTargetMajor = magnitude >= (thresholds.mMinAlert ?? 4.5);
-    const isM45PlusTarget = magnitude >= 4.5;
-    const isShallow =
-      thresholds.shallowDepthKmMax === undefined ||
-      input.event.depthKm === undefined ||
-      input.event.depthKm <= thresholds.shallowDepthKmMax;
-    const rateMultiple = input.baseline?.rateMultiple ?? 0;
-    const count24h = input.baseline?.currentCount24h ?? 0;
-    const crossesRate = rateMultiple >= (thresholds.swarmRateXBaseline ?? Number.POSITIVE_INFINITY);
-    const crossesCount =
-      thresholds.swarmCount24h !== undefined ? count24h >= thresholds.swarmCount24h : false;
+  } else if (input.event.eventType === "earthquake") {
+    if (!input.event.region) {
+      stage = "S0";
+      reason = "official earthquake outside configured target regions";
+      confidence = 0.2;
+      shouldNotify = false;
+    } else {
+      const rule = getRegionRule(input.event.region, config);
+      const thresholds = rule.alertThresholds;
+      const magnitude = input.event.magnitude ?? 0;
+      const isTargetMajor = magnitude >= (thresholds.mMinAlert ?? 4.5);
+      const isM45PlusTarget = magnitude >= 4.5;
+      const isShallow =
+        thresholds.shallowDepthKmMax === undefined ||
+        input.event.depthKm === undefined ||
+        input.event.depthKm <= thresholds.shallowDepthKmMax;
+      const rateMultiple = input.baseline?.rateMultiple ?? 0;
+      const count24h = input.baseline?.currentCount24h ?? 0;
+      const crossesRate = rateMultiple >= (thresholds.swarmRateXBaseline ?? Number.POSITIVE_INFINITY);
+      const crossesCount =
+        thresholds.swarmCount24h !== undefined ? count24h >= thresholds.swarmCount24h : false;
 
-    if (isM45PlusTarget) {
-      stage = "S5";
-      reason = `M${magnitude.toFixed(1)} target-region earthquake; tsunami feed status=${input.tsunamiStatus ?? "unknown"}`;
-      confidence = 0.9;
-      shouldNotify = true;
-    } else if (activeWindow && isShallow && isTargetMajor) {
-      stage = "S3";
-      reason = `new M${magnitude.toFixed(1)} shallow event during active S1 window`;
-      confidence = 0.7;
-      shouldNotify = true;
-    } else if (activeWindow && isShallow && crossesRate) {
-      stage = "S3";
-      reason = `quake rate ${rateMultiple.toFixed(1)}x baseline during active S1 window`;
-      confidence = 0.75;
-      shouldNotify = true;
-    } else if (activeWindow && (crossesRate || crossesCount)) {
-      stage = "S2";
-      reason = `local response: ${count24h} quakes/24h, ${rateMultiple.toFixed(1)}x baseline`;
-      confidence = 0.5;
-      shouldNotify = false;
-    } else if (activeWindow) {
-      stage = "S1";
-      reason = "active S1 window but no local seismic anomaly above threshold";
-      confidence = 0.35;
-      shouldNotify = false;
+      if (isM45PlusTarget) {
+        stage = "S5";
+        reason = `M${magnitude.toFixed(1)} target-region earthquake; tsunami feed status=${input.tsunamiStatus ?? "unknown"}`;
+        confidence = 0.9;
+        shouldNotify = true;
+      } else if (activeWindow && isShallow && isTargetMajor) {
+        stage = "S3";
+        reason = `new M${magnitude.toFixed(1)} shallow event during active S1 window`;
+        confidence = 0.7;
+        shouldNotify = true;
+      } else if (activeWindow && isShallow && crossesRate) {
+        stage = "S3";
+        reason = `quake rate ${rateMultiple.toFixed(1)}x baseline during active S1 window`;
+        confidence = 0.75;
+        shouldNotify = true;
+      } else if (activeWindow && (crossesRate || crossesCount)) {
+        stage = "S2";
+        reason = `local response: ${count24h} quakes/24h, ${rateMultiple.toFixed(1)}x baseline`;
+        confidence = 0.5;
+        shouldNotify = false;
+      } else if (activeWindow) {
+        stage = "S1";
+        reason = "active S1 window but no local seismic anomaly above threshold";
+        confidence = 0.35;
+        shouldNotify = false;
+      }
     }
   }
 
@@ -148,7 +155,7 @@ export function evaluateCascade(input: CascadeInput): CascadeState {
   };
 }
 
-function inferFallbackRegion(event: NormalizedEvent): RegionId {
+function fallbackRegionForState(event: NormalizedEvent): RegionId {
   return event.region ?? "PNW_CASCADIA_OFFSHORE";
 }
 

@@ -26,6 +26,9 @@ describe("notifier", () => {
     expect(payload.requiredFields.cascade_stage).toBe("S5");
     expect(payload.requiredFields.stale_gate_result).toBe("passed");
     expect(payload.body).toContain("tsunami feed status=none");
+    expect(payload.body).toContain("*Event:* M 2.4 - 3 km S of Mount Rainier");
+    expect(payload.body).toContain("*Magnitude:* M5.5");
+    expect(payload.body).toContain("*Depth:* 4.0 km");
   });
 
   it("formats the outbound webhook body for Slack with all required alert fields", () => {
@@ -35,6 +38,8 @@ describe("notifier", () => {
     const webhookPayload = buildSlackWebhookPayload(payload);
 
     expect(webhookPayload.text).toContain("GEOSPACE WATCH: S5");
+    expect(webhookPayload.text).toContain("*Why this fired:*");
+    expect(webhookPayload.text).toContain("*Required audit fields*");
     expect(webhookPayload.text).toContain("source: usgs_earthquake_geojson");
     expect(webhookPayload.text).toContain(`event_time: ${event.eventTime.toISOString()}`);
     expect(webhookPayload.text).toContain(`source_updated_at: ${event.sourceUpdatedAt.toISOString()}`);
@@ -134,7 +139,12 @@ describe("notifier", () => {
       const result = await notifier.notify(eventFixture(), cascadeFixture());
       expect(fetchMock).toHaveBeenCalledTimes(1);
       const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
-      const body = JSON.parse(init.body as string) as { channel: string; text: string; unfurl_links: boolean };
+      const body = JSON.parse(init.body as string) as {
+        channel: string;
+        text: string;
+        mrkdwn: boolean;
+        unfurl_links: boolean;
+      };
 
       expect(url).toBe("https://slack.com/api/chat.postMessage");
       expect(init.headers).toMatchObject({
@@ -144,6 +154,7 @@ describe("notifier", () => {
       expect(result.sent).toBe(true);
       expect(result.channel).toBe("slack_bot");
       expect(body.channel).toBe("C0AS8NB0LQY");
+      expect(body.mrkdwn).toBe(true);
       expect(body.unfurl_links).toBe(false);
       expect(body.text).toContain("source: usgs_earthquake_geojson");
       expect(body.text).toContain("event_time:");

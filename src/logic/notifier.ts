@@ -6,6 +6,7 @@ export interface SlackWebhookPayload {
 
 export interface SlackBotPostPayload extends SlackWebhookPayload {
   channel: string;
+  mrkdwn: true;
   unfurl_links: false;
 }
 
@@ -155,6 +156,7 @@ export function buildSlackBotPostPayload(payload: AlertPayload, channel: string)
   return {
     ...buildSlackWebhookPayload(payload),
     channel,
+    mrkdwn: true,
     unfurl_links: false
   };
 }
@@ -172,25 +174,23 @@ export function buildSlackWebhookPayload(payload: AlertPayload): SlackWebhookPay
   ].join("\n");
 
   return {
-    text: `${payload.dryRun ? "[DRY RUN] " : ""}${payload.title}\n\n${payload.body}\n\nRequired fields:\n${requiredFields}`
+    text: `${payload.dryRun ? "[DRY RUN] " : ""}*${payload.title}*\n\n${payload.body}\n\n*Required audit fields*\n\`\`\`\n${requiredFields}\n\`\`\``
   };
 }
 
 export function buildAlertPayload(event: NormalizedEvent, state: CascadeState, dryRun: boolean): AlertPayload {
   const staleGateResult = state.staleGatePassed ? "passed" : `failed:${state.staleGate.reasons.join("|")}`;
-  const title = `GEOSPACE WATCH: ${state.stage} ${stageName(state.stage)}`;
+  const title = `GEOSPACE WATCH: ${state.stage} ${stageName(state.stage)} - ${event.title}`;
   const body = [
-    `Region: ${state.region}`,
-    `Reason: ${state.reason}`,
-    `Official source: ${event.source}`,
-    `Official URL: ${event.officialUrl}`,
-    `Event time: ${event.eventTime.toISOString()}`,
-    `Source updated at: ${event.sourceUpdatedAt.toISOString()}`,
-    `Ingest time: ${event.ingestTime.toISOString()}`,
-    `Cascade stage: ${state.stage}`,
-    `Stale gate: ${staleGateResult}`,
-    `Confidence: ${state.confidence.toFixed(2)}`,
-    "Risk read: elevated monitoring, not prediction; alert escalates only from official timestamped sources."
+    `*Event:* ${event.title}`,
+    `*Region:* ${humanizeRegion(state.region)}`,
+    `*Why this fired:* ${state.reason}`,
+    ...eventDetailLines(event),
+    `*Official source:* ${sourceLabel(event.source)} (${event.source})`,
+    `*Official URL:* ${event.officialUrl}`,
+    `*Stale gate:* ${staleGateResult}`,
+    `*Confidence:* ${state.confidence.toFixed(2)}`,
+    "_Monitoring alert, not prediction. Triggered only from official timestamped sources._"
   ].join("\n");
 
   return {
@@ -208,6 +208,49 @@ export function buildAlertPayload(event: NormalizedEvent, state: CascadeState, d
       stale_gate_result: staleGateResult
     }
   };
+}
+
+function eventDetailLines(event: NormalizedEvent): string[] {
+  const lines = [
+    `*Event time:* ${event.eventTime.toISOString()}`,
+    `*Source updated:* ${event.sourceUpdatedAt.toISOString()}`
+  ];
+  if (event.magnitude !== undefined) {
+    lines.push(`*Magnitude:* M${event.magnitude.toFixed(1)}`);
+  }
+  if (event.depthKm !== undefined) {
+    lines.push(`*Depth:* ${event.depthKm.toFixed(1)} km`);
+  }
+  if (event.lat !== undefined && event.lon !== undefined) {
+    lines.push(`*Coordinates:* ${event.lat.toFixed(4)}, ${event.lon.toFixed(4)}`);
+  }
+  if (event.severity) {
+    lines.push(`*Official status:* ${event.severity}`);
+  }
+  return lines;
+}
+
+function humanizeRegion(region: string): string {
+  return region
+    .split("_")
+    .map((part) => part.charAt(0) + part.slice(1).toLowerCase())
+    .join(" ");
+}
+
+function sourceLabel(source: string): string {
+  const labels: Record<string, string> = {
+    usgs_earthquake_geojson: "USGS earthquake feed",
+    usgs_fdsn_backfill: "USGS FDSN backfill",
+    usgs_hans: "USGS HANS volcano API",
+    swpc_kp: "NOAA/SWPC Kp feed",
+    swpc_goes_xray: "NOAA/SWPC GOES X-ray",
+    swpc_solar_wind: "NOAA/SWPC solar wind",
+    swpc_alerts: "NOAA/SWPC alerts",
+    nasa_donki: "NASA DONKI",
+    tsunami_ntwc: "NOAA NTWC tsunami feed",
+    tsunami_ptwc: "NOAA PTWC tsunami feed"
+  };
+  return labels[source] ?? source;
 }
 
 function stageRank(stage: CascadeState["stage"]): number {

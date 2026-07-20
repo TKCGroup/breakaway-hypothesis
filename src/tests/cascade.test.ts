@@ -79,6 +79,47 @@ describe("cascade", () => {
     expect(state.shouldNotify).toBe(true);
   });
 
+  it("does not promote official global M5+ earthquakes outside configured regions", () => {
+    const outsideEvents = [
+      eventFixture({
+        id: "us7000t21e",
+        externalId: "us7000t21e",
+        title: "M 5.0 - south of the Kermadec Islands",
+        eventTime: new Date("2026-07-20T20:44:19.902Z"),
+        sourceUpdatedAt: new Date("2026-07-20T21:05:24.040Z"),
+        ingestTime: new Date("2026-07-20T21:15:07.709Z"),
+        region: undefined,
+        lat: -32.759,
+        lon: -178.0878,
+        depthKm: 10,
+        magnitude: 5,
+        officialUrl: "https://earthquake.usgs.gov/earthquakes/eventpage/us7000t21e"
+      }),
+      eventFixture({
+        id: "us7000t21z",
+        externalId: "us7000t21z",
+        title: "M 5.6 - northern Mid-Atlantic Ridge",
+        eventTime: new Date("2026-07-20T21:28:30.326Z"),
+        sourceUpdatedAt: new Date("2026-07-20T21:53:05.069Z"),
+        ingestTime: new Date("2026-07-20T22:00:25.776Z"),
+        region: undefined,
+        lat: 14.5216,
+        lon: -45.1002,
+        depthKm: 10,
+        magnitude: 5.6,
+        officialUrl: "https://earthquake.usgs.gov/earthquakes/eventpage/us7000t21z"
+      })
+    ];
+
+    for (const event of outsideEvents) {
+      const state = evaluateCascade({ event, now: new Date("2026-07-20T22:15:00.000Z") });
+
+      expect(state.stage).toBe("S0");
+      expect(state.shouldNotify).toBe(false);
+      expect(state.reason).toBe("official earthquake outside configured target regions");
+    }
+  });
+
   it("official HANS elevated volcano immediately promotes to S4", () => {
     const state = evaluateCascade({
       event: eventFixture({
