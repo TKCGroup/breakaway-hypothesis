@@ -24,7 +24,7 @@
 - Cloud Run service `breakaway-hypothesis-watcher` is live on `altbot-486317`, region `us-central1`.
 - Live revision: `breakaway-hypothesis-watcher-00005-tj7`, 100% traffic, image digest `sha256:9bde2e5a3459f1ba60759ffca4161943e6501ad1653984f527938339d303ac5a`.
 - `DRY_RUN=false`; notifications use `SLACK_BOT_TOKEN` via Slack `chat.postMessage` and `SLACK_CHANNEL_ID=C0AS8NB0LQY`.
-- Scheduler `breakaway-watcher-run` remains enabled at `*/15 * * * *` America/Chicago. Manual trigger at `2026-07-20T22:10:43Z` returned HTTP 200.
+- Scheduler `breakaway-watcher-run` remains enabled at `*/15 * * * *` America/Chicago. Manual trigger at `2026-07-20T22:10:43Z` returned HTTP 200; normal scheduled run at `2026-07-20T22:15:11Z` returned HTTP 200.
 - Official USGS FDSN backfill completed in Cloud Run Job `breakaway-baseline-backfill-x5d5n`: 13,191 events upserted, 18 baselines saved.
 - Live Slack alert verification: revision `00005-tj7` logged `sent: true`, `channel: slack_bot`, `dryRun: false`, `source: usgs_earthquake_geojson`, `cascade_stage: S5`, `stale_gate_result: passed`.
 - Public health probes: `/` and `/healthz/` return `{"ok":true,"dryRun":false}`. Exact `/healthz` returns a Google front-end 404 before app logs; use `/healthz/` or `/`.

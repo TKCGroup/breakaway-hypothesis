@@ -17,7 +17,7 @@
 - `pnpm build`
 - Cloud Run source deploy rebuilt the Dockerfile gate.
 - Cloud Run Job `breakaway-baseline-backfill-x5d5n` completed successfully.
-- Manual Scheduler trigger returned HTTP 200 at `2026-07-20T22:10:43Z`.
+- Manual Scheduler trigger returned HTTP 200 at `2026-07-20T22:10:43Z`; normal scheduled run returned HTTP 200 at `2026-07-20T22:15:11Z`.
 - Live logs include successful Slack sends with official USGS source, event time, source updated time, ingest time, region, cascade stage, and stale-gate result.
 
 ## Watch
