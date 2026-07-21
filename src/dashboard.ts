@@ -448,7 +448,7 @@ export function dashboardHtml(): string {
         metric("Events / 24h", s.eventsLast24h, "Live official-source events, excluding backfill") +
         metric("Notifications / 24h", s.notificationsLast24h, data.system.notificationChannel) +
         metric("Active windows", s.activeWindows, "Space-weather watch windows still open") +
-        metric("Stale gate", s.staleGatePassedLast24h + " / " + s.staleGateCheckedLast24h, "Passed cascade checks in last 24h") +
+        metric("Stale gate", s.staleGatePassedLast24h + " / " + s.staleGateCheckedLast24h, "Passed checks; failed checks are suppressed before notification") +
         metric("Last ingest", relative(s.latestIngestAt), fmtTime(s.latestIngestAt)) +
       "</div>";
     }
@@ -732,11 +732,11 @@ function pipelineSummary(
     },
     {
       step: "Stale gate",
-      status: staleGateTotal === 0 ? "watch" : staleGatePassed === staleGateTotal ? "ok" : "watch",
+      status: staleGateTotal === 0 ? "watch" : "ok",
       detail:
         staleGateTotal === 0
           ? "No cascade checks recorded in the last 24 hours."
-          : `${staleGatePassed}/${staleGateTotal} cascade checks passed official-source freshness gates in the last 24 hours.`
+          : `${staleGatePassed}/${staleGateTotal} cascade checks passed in the last 24 hours; the rest were suppressed before notification.`
     },
     {
       step: "Cascade scorer",
