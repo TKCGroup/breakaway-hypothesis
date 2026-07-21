@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { createWatcherServer } from "../server.js";
+import { InMemoryWatcherRepository } from "../db/repository.js";
 
 describe("watcher HTTP server", () => {
   const originalSecret = process.env.SCHEDULER_SHARED_SECRET;
@@ -37,6 +38,47 @@ describe("watcher HTTP server", () => {
     }
   });
 
+  it("serves the read-only dashboard shell without scheduler auth", async () => {
+    delete process.env.SCHEDULER_SHARED_SECRET;
+    const { url, close } = await listen();
+
+    try {
+      const response = await fetch(`${url}/dashboard`);
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-type")).toContain("text/html");
+      expect(await response.text()).toContain("Engine under the hood");
+    } finally {
+      await close();
+    }
+  });
+
+  it("serves dashboard JSON from the repository without exposing /run", async () => {
+    delete process.env.SCHEDULER_SHARED_SECRET;
+    const repo = new InMemoryWatcherRepository();
+    const { url, close } = await listen(
+      createWatcherServer({
+        createRepositoryHandle: () => ({
+          repo,
+          close: async () => {}
+        })
+      })
+    );
+
+    try {
+      const response = await fetch(`${url}/api/dashboard`);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({
+        ok: true,
+        system: {
+          service: "breakaway-hypothesis-watcher",
+          officialOnly: true
+        }
+      });
+    } finally {
+      await close();
+    }
+  });
+
   it("rejects /run when scheduler secret is unset", async () => {
     delete process.env.SCHEDULER_SHARED_SECRET;
     const { url, close } = await listen();
@@ -67,8 +109,7 @@ describe("watcher HTTP server", () => {
   });
 });
 
-async function listen(): Promise<{ url: string; close: () => Promise<void> }> {
-  const server = createWatcherServer();
+async function listen(server = createWatcherServer()): Promise<{ url: string; close: () => Promise<void> }> {
   await new Promise<void>((resolve) => {
     server.listen(0, "127.0.0.1", resolve);
   });

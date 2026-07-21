@@ -1,14 +1,25 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { loadConfig } from "./config.js";
-import { createRepository } from "./db/createRepository.js";
+import { loadConfig, type WatcherConfig } from "./config.js";
+import { createRepository, type RepositoryHandle } from "./db/createRepository.js";
 import { runMigrations } from "./db/migrations.js";
+import { buildDashboardData, dashboardHtml } from "./dashboard.js";
 import { runOnce } from "./worker.js";
 
 const config = loadConfig();
 const port = Number(process.env.PORT ?? 8080);
 let running = false;
 
-async function handleRun(req: IncomingMessage, res: ServerResponse): Promise<void> {
+interface ServerContext {
+  config: WatcherConfig;
+  createRepositoryHandle: () => RepositoryHandle;
+}
+
+export interface WatcherServerOptions {
+  config?: WatcherConfig;
+  createRepositoryHandle?: () => RepositoryHandle;
+}
+
+async function handleRun(req: IncomingMessage, res: ServerResponse, context: ServerContext): Promise<void> {
   if (req.method !== "POST") {
     writeJson(res, 405, { ok: false, error: "method_not_allowed" });
     return;
@@ -31,14 +42,14 @@ async function handleRun(req: IncomingMessage, res: ServerResponse): Promise<voi
   }
 
   const startedAt = new Date();
-  const handle = createRepository();
+  const handle = context.createRepositoryHandle();
   running = true;
 
   try {
     await runOnce(startedAt, handle.repo);
     writeJson(res, 200, {
       ok: true,
-      dryRun: config.dryRun,
+      dryRun: context.config.dryRun,
       started_at: startedAt.toISOString(),
       completed_at: new Date().toISOString()
     });
@@ -55,22 +66,58 @@ async function handleRun(req: IncomingMessage, res: ServerResponse): Promise<voi
   }
 }
 
-export function createWatcherServer() {
+async function handleDashboardApi(req: IncomingMessage, res: ServerResponse, context: ServerContext): Promise<void> {
+  if (req.method !== "GET") {
+    writeJson(res, 405, { ok: false, error: "method_not_allowed" });
+    return;
+  }
+
+  const handle = context.createRepositoryHandle();
+  try {
+    const data = await buildDashboardData(handle.repo, context.config);
+    writeJson(res, 200, data);
+  } catch (error) {
+    writeJson(res, 500, { ok: false, error: error instanceof Error ? error.message : String(error) });
+  } finally {
+    await handle.close();
+  }
+}
+
+export function createWatcherServer(options: WatcherServerOptions = {}) {
+  const context: ServerContext = {
+    config: options.config ?? config,
+    createRepositoryHandle: options.createRepositoryHandle ?? createRepository
+  };
+
   return createServer((req, res) => {
-    void route(req, res);
+    void route(req, res, context);
   });
 }
 
-async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
+async function route(req: IncomingMessage, res: ServerResponse, context: ServerContext): Promise<void> {
   const pathname = new URL(req.url ?? "/", "http://localhost").pathname.replace(/\/+$/, "") || "/";
 
   if (pathname === "/" || pathname === "/healthz") {
-    writeJson(res, 200, { ok: true, dryRun: config.dryRun });
+    writeJson(res, 200, { ok: true, dryRun: context.config.dryRun });
+    return;
+  }
+
+  if (pathname === "/dashboard") {
+    if (req.method !== "GET") {
+      writeJson(res, 405, { ok: false, error: "method_not_allowed" });
+      return;
+    }
+    writeHtml(res, 200, dashboardHtml());
+    return;
+  }
+
+  if (pathname === "/api/dashboard") {
+    await handleDashboardApi(req, res, context);
     return;
   }
 
   if (pathname === "/run") {
-    await handleRun(req, res);
+    await handleRun(req, res, context);
     return;
   }
 
@@ -78,8 +125,13 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
 }
 
 function writeJson(res: ServerResponse, statusCode: number, body: unknown): void {
-  res.writeHead(statusCode, { "content-type": "application/json" });
+  res.writeHead(statusCode, { "content-type": "application/json", "cache-control": "no-store" });
   res.end(JSON.stringify(body));
+}
+
+function writeHtml(res: ServerResponse, statusCode: number, body: string): void {
+  res.writeHead(statusCode, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+  res.end(body);
 }
 
 async function start(): Promise<void> {
