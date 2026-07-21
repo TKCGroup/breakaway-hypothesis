@@ -58,3 +58,18 @@
 - Live revision after verification: `breakaway-hypothesis-watcher-00009-7qm`, 100% traffic, `DRY_RUN=false`.
 - Live forced Scheduler run at `2026-07-20T22:31:26Z` returned HTTP 200. Logs for revision `00009-7qm` have no hits for `us7000t21e`, `us7000t21z`, `us7000t1x5`, comparator-only alerts, or outside-target alert attempts.
 - Public health verification: `https://breakaway-hypothesis-watcher-479952073196.us-central1.run.app/healthz/` returns `{"ok":true,"dryRun":false}`.
+
+## Dashboard Update — 2026-07-21
+
+- Added a read-only hosted dashboard to the existing Cloud Run worker:
+  - UI: `https://breakaway-hypothesis-watcher-479952073196.us-central1.run.app/dashboard`
+  - JSON: `https://breakaway-hypothesis-watcher-479952073196.us-central1.run.app/api/dashboard`
+- Dashboard shows live/dry-run mode, official source freshness, engine pipeline, configured region stages, active watch windows, recent official events, filtered official events, notification records, and USGS FDSN baselines.
+- Hard-rule posture preserved: dashboard reads only persisted official-source database records and does not use news/search/social/snippet data.
+- Code commits pushed:
+  - `98fe5a9 Add live watcher dashboard`
+  - `d731b6e Clarify dashboard stale gate status`
+- Local gates passed after final dashboard copy: `pnpm typecheck`, `pnpm test` (53/53), `pnpm build`.
+- Current live Cloud Run revision: `breakaway-hypothesis-watcher-00011-m4v`, 100% traffic, `DRY_RUN=false`, Slack bot channel `C0AS8NB0LQY`.
+- Hosted verification at `2026-07-21T05:27:37Z`: `/dashboard` HTTP 200, `/api/dashboard` HTTP 200, `/healthz/` HTTP 200, no final-revision error logs.
+- Live API snapshot: all six scheduled official sources `ok`, mode `live`, notification channel `slack_bot`, current max stage `S1`, 260 live official events in the last 24h.
