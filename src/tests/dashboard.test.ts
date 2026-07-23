@@ -26,6 +26,14 @@ describe("dashboard data", () => {
         officialUrl: "https://earthquake.usgs.gov/earthquakes/eventpage/us7000t21z"
       })
     );
+    await repo.saveCascadeState(
+      cascadeFixture({
+        id: "cascade-previous",
+        stage: "S1",
+        stageStartedAt: new Date(NOW.getTime() - 15 * 60_000),
+        shouldNotify: false
+      })
+    );
     await repo.saveCascadeState(cascadeFixture());
     await repo.saveWatchWindow({
       id: "window-1",
@@ -68,13 +76,40 @@ describe("dashboard data", () => {
     expect(data.system.mode).toBe("live");
     expect(data.system.officialOnly).toBe(true);
     expect(data.system.notificationChannel).toBe("slack_bot");
+    expect(data.posture).toMatchObject({
+      stage: "S3",
+      label: "Elevated watch",
+      action: "Review now",
+      sourceHealth: "degraded"
+    });
+    expect(data.latestCycle).toMatchObject({
+      officialEventsIngested: 2,
+      targetEventsIngested: 1,
+      alertsSent: 1,
+      sourceFailures: [],
+      materialChange: true
+    });
+    expect(data.latestCycle.stageChanges).toEqual([
+      {
+        region: "CASCADE_VOLCANOES_RAINIER",
+        label: "Mount Rainier",
+        fromStage: "S1",
+        toStage: "S3"
+      }
+    ]);
     expect(data.sources.find((source) => source.source === "usgs_earthquake_geojson")).toMatchObject({
       status: "ok",
       recordsSeen: 2
     });
     expect(data.regions.find((region) => region.region === "CASCADE_VOLCANOES_RAINIER")).toMatchObject({
       stage: "S3",
-      staleGatePassed: true
+      stageLabel: "Elevated",
+      staleGatePassed: true,
+      alertThreshold: "M3.5+ | 50 quakes/24h | 4x baseline | depth <= 8 km | HANS above NORMAL",
+      latestEvent: {
+        externalId: "us7000test",
+        source: "usgs_earthquake_geojson"
+      }
     });
     expect(data.filteredOfficialEvents[0]).toMatchObject({
       externalId: "us7000t21z",

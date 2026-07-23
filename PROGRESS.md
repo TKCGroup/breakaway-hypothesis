@@ -73,3 +73,13 @@
 - Current live Cloud Run revision: `breakaway-hypothesis-watcher-00011-m4v`, 100% traffic, `DRY_RUN=false`, Slack bot channel `C0AS8NB0LQY`.
 - Hosted verification at `2026-07-21T05:27:37Z`: `/dashboard` HTTP 200, `/api/dashboard` HTTP 200, `/healthz/` HTTP 200, no final-revision error logs.
 - Live API snapshot: all six scheduled official sources `ok`, mode `live`, notification channel `slack_bot`, current max stage `S1`, 260 live official events in the last 24h.
+
+## Dashboard Triage Redesign — 2026-07-23
+
+- [x] Add a plain-language operating posture with an explicit operator action.
+- [x] Add a latest-cycle change summary for new official events, stage changes, notifications, and source failures.
+- [x] Sort target regions by urgency and show latest official event plus configured alert threshold.
+- [x] Rename stale-gate and watch-window metrics so suppression and context are understandable at a glance.
+- [x] Move healthy source detail and engine internals below the primary triage surface.
+- [x] Verify desktop and mobile layouts, then pass `pnpm typecheck`, `pnpm test`, and `pnpm build`.
+- [ ] Push the verified change and request production deployment from Altbot.

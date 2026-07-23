@@ -1,4 +1,4 @@
-import { DEFAULT_CONFIG, OFFICIAL_SOURCES, type WatcherConfig } from "./config.js";
+import { DEFAULT_CONFIG, OFFICIAL_SOURCES, type RegionRule, type WatcherConfig } from "./config.js";
 import type {
   CascadeStage,
   CascadeState,
@@ -37,13 +37,17 @@ interface RegionSummary {
   region: string;
   label: string;
   stage: CascadeStage;
+  stageLabel: string;
+  operatorSummary: string;
   reason: string;
   confidence: number;
   staleGatePassed: boolean;
   stageStartedAt?: string;
   latestEventId?: string;
+  latestEvent?: EventSummary;
   activeWindowId?: string;
   comparatorOnly: boolean;
+  alertThreshold: string;
 }
 
 interface EventSummary {
@@ -97,6 +101,13 @@ interface BaselineSummary {
   sampleCount: number;
 }
 
+interface StageChangeSummary {
+  region: string;
+  label: string;
+  fromStage: CascadeStage;
+  toStage: CascadeStage;
+}
+
 export interface DashboardData {
   ok: true;
   generatedAt: string;
@@ -108,6 +119,29 @@ export interface DashboardData {
     officialOnly: true;
     notificationChannel: "slack_bot" | "webhook" | "dry_run" | "unconfigured";
     hardRule: string;
+  };
+  posture: {
+    stage: CascadeStage;
+    label: string;
+    action: string;
+    detail: string;
+    tone: "normal" | "watch" | "elevated" | "critical";
+    sourceHealth: "healthy" | "degraded";
+    sourceHealthDetail: string;
+  };
+  latestCycle: {
+    startedAt?: string;
+    completedAt?: string;
+    officialEventsIngested: number;
+    targetEventsIngested: number;
+    cascadeChecks: number;
+    staleGatePassed: number;
+    alertsSent: number;
+    sourceFailures: string[];
+    stageChanges: StageChangeSummary[];
+    materialChange: boolean;
+    headline: string;
+    detail: string;
   };
   summary: {
     latestIngestAt?: string;
@@ -151,9 +185,16 @@ export async function buildDashboardData(
   const liveEvents = events
     .filter((event) => event.source !== "usgs_fdsn_backfill")
     .sort((a, b) => b.ingestTime.getTime() - a.ingestTime.getTime());
+  const eventsById = new Map(liveEvents.map((event) => [event.id, event]));
   const cascadeByRegion = latestCascadeByRegion(cascadeStates);
-  const regions = config.regions.map((rule) => regionSummary(rule.id, cascadeByRegion.get(rule.id)));
-  const latestRunCompletedAt = maxIso(sourceRuns.map((run) => run.completedAt));
+  const regions = config.regions.map((rule) => {
+    const state = cascadeByRegion.get(rule.id);
+    return regionSummary(rule, state, state ? eventsById.get(state.latestEventId) : undefined);
+  });
+  const sources = sourceSummaries(sourceRuns, liveEvents, config, now);
+  const latestCycle = latestCycleSummary(config, sourceRuns, liveEvents, cascadeStates, notifications);
+  const posture = postureSummary(regions, sources);
+  const latestRunCompletedAt = latestCycle.completedAt ?? maxIso(sourceRuns.map((run) => run.completedAt));
   const latestIngestAt = maxIso(liveEvents.map((event) => event.ingestTime));
   const latestSourceUpdatedAt = maxIso(liveEvents.map((event) => event.sourceUpdatedAt));
   const statesLast24h = cascadeStates.filter((state) => state.stageStartedAt >= hoursAgo(now, 24));
@@ -185,6 +226,8 @@ export async function buildDashboardData(
       hardRule:
         "Alerts are generated only from official source records after stale-gate evaluation; news, search, social, and snippets are excluded."
     },
+    posture,
+    latestCycle,
     summary: {
       latestIngestAt,
       latestSourceUpdatedAt,
@@ -197,10 +240,13 @@ export async function buildDashboardData(
       staleGateCheckedLast24h: statesLast24h.length
     },
     pipeline: pipelineSummary(config, sourceRuns, statesLast24h, notifications, now),
-    sources: sourceSummaries(sourceRuns, liveEvents, config, now),
+    sources,
     regions,
     activeWindows: activeWindows.map(windowSummary),
-    recentEvents: liveEvents.slice(0, 24).map(eventSummary),
+    recentEvents: liveEvents
+      .filter((event) => event.region && event.region !== "CARIBBEAN_VENEZUELA_COMPARATOR")
+      .slice(0, 24)
+      .map(eventSummary),
     filteredOfficialEvents: liveEvents
       .filter((event) => !event.region || event.region === "CARIBBEAN_VENEZUELA_COMPARATOR")
       .slice(0, 12)
@@ -222,18 +268,20 @@ export function dashboardHtml(): string {
   <style>
     :root {
       color-scheme: light;
-      --bg: #f6f7f4;
+      --bg: #f2f5f1;
       --panel: #ffffff;
-      --ink: #17211b;
-      --muted: #667064;
-      --line: #dfe5dc;
+      --ink: #162019;
+      --muted: #626d64;
+      --line: #d9e1d8;
       --ok: #167244;
-      --watch: #a05f00;
+      --watch: #8a5700;
       --warn: #b42318;
       --soft-ok: #e7f5ed;
-      --soft-watch: #fff2d6;
+      --soft-watch: #fff3d9;
       --soft-warn: #fdebea;
-      --accent: #275d50;
+      --accent: #176151;
+      --blue: #236a9e;
+      --soft-blue: #e8f2f8;
       --stage0: #8a938b;
       --stage1: #3677a8;
       --stage2: #8362b5;
@@ -251,17 +299,17 @@ export function dashboardHtml(): string {
     }
     a { color: var(--accent); text-decoration: none; }
     a:hover { text-decoration: underline; }
-    .shell { max-width: 1480px; margin: 0 auto; padding: 20px; }
+    .shell { max-width: 1400px; margin: 0 auto; padding: 20px 24px; }
     header {
       display: grid;
       grid-template-columns: 1fr auto;
       gap: 16px;
       align-items: start;
-      padding: 18px 0 14px;
+      padding: 12px 0 14px;
       border-bottom: 1px solid var(--line);
     }
-    h1 { margin: 0; font-size: 28px; line-height: 1.1; letter-spacing: 0; }
-    .subhead { margin: 8px 0 0; max-width: 900px; color: var(--muted); line-height: 1.45; }
+    h1 { margin: 0; font-size: 24px; line-height: 1.15; letter-spacing: 0; }
+    .subhead { margin: 5px 0 0; max-width: 760px; color: var(--muted); font-size: 13px; line-height: 1.45; }
     .statusbar { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
     .pill {
       display: inline-flex;
@@ -279,20 +327,20 @@ export function dashboardHtml(): string {
     .pill.ok { color: var(--ok); background: var(--soft-ok); border-color: #b8dec8; }
     .pill.warn { color: var(--warn); background: var(--soft-warn); border-color: #f2bfba; }
     .pill.watch { color: var(--watch); background: var(--soft-watch); border-color: #f2d08e; }
-    main { display: grid; gap: 18px; padding-top: 18px; }
-    .metrics { display: grid; grid-template-columns: repeat(6, minmax(145px, 1fr)); gap: 12px; }
+    main { display: grid; gap: 14px; padding-top: 14px; }
+    .metrics { display: grid; grid-template-columns: repeat(4, minmax(145px, 1fr)); gap: 10px; }
     .metric {
       background: var(--panel);
       border: 1px solid var(--line);
       border-radius: 8px;
       padding: 14px;
-      min-height: 96px;
+      min-height: 90px;
     }
     .metric .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
     .metric .value { margin-top: 8px; font-size: 24px; font-weight: 750; line-height: 1.1; }
     .metric .note { margin-top: 8px; color: var(--muted); font-size: 12px; line-height: 1.35; }
-    .grid-2 { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(360px, .9fr); gap: 18px; align-items: start; }
-    .grid-3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; align-items: start; }
+    .grid-2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; align-items: start; }
+    .grid-3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; align-items: start; }
     section {
       background: var(--panel);
       border: 1px solid var(--line);
@@ -313,16 +361,24 @@ export function dashboardHtml(): string {
     .step { background: var(--panel); padding: 16px; min-height: 122px; }
     .step-title { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-weight: 750; }
     .step-detail { margin-top: 10px; color: var(--muted); font-size: 13px; line-height: 1.4; }
-    .regions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; padding: 14px; }
+    .regions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; background: var(--line); }
     .region {
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      padding: 12px;
-      min-height: 150px;
+      border: 0;
+      border-left: 4px solid var(--stage0);
+      border-radius: 0;
+      background: var(--panel);
+      padding: 15px 16px 14px;
+      min-height: 190px;
       display: grid;
-      gap: 8px;
+      gap: 9px;
       align-content: start;
     }
+    .region.S0 { border-left-color: var(--stage0); }
+    .region.S1 { border-left-color: var(--stage1); }
+    .region.S2 { border-left-color: var(--stage2); }
+    .region.S3 { border-left-color: var(--stage3); }
+    .region.S4 { border-left-color: var(--stage4); }
+    .region.S5 { border-left-color: var(--stage5); }
     .region-top { display: flex; align-items: start; justify-content: space-between; gap: 10px; }
     .region-name { font-weight: 750; line-height: 1.2; }
     .stage {
@@ -334,6 +390,7 @@ export function dashboardHtml(): string {
       color: #fff;
       font-weight: 800;
       font-size: 13px;
+      white-space: nowrap;
     }
     .stage.S0 { background: var(--stage0); }
     .stage.S1 { background: var(--stage1); }
@@ -343,6 +400,14 @@ export function dashboardHtml(): string {
     .stage.S5 { background: var(--stage5); }
     .reason { color: var(--muted); font-size: 13px; line-height: 1.4; }
     .micro { color: var(--muted); font-size: 12px; line-height: 1.35; }
+    .region-summary { font-weight: 700; font-size: 13px; line-height: 1.4; }
+    .region-event { padding-top: 9px; border-top: 1px solid var(--line); font-size: 12px; line-height: 1.4; }
+    .region-event .event-label, .threshold-label { display: block; color: var(--muted); font-size: 10px; font-weight: 750; letter-spacing: .05em; text-transform: uppercase; }
+    .region-event a { display: inline-block; margin-top: 3px; font-weight: 700; }
+    .threshold { color: var(--muted); font-size: 11px; line-height: 1.4; }
+    .region-meta { display: flex; flex-wrap: wrap; gap: 6px 12px; color: var(--muted); font-size: 11px; }
+    .engine-reason { color: var(--muted); font-size: 11px; }
+    .engine-reason summary { cursor: pointer; }
     table { width: 100%; border-collapse: collapse; font-size: 13px; }
     th, td { padding: 10px 12px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
     th { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; background: #fafbf9; }
@@ -372,18 +437,76 @@ export function dashboardHtml(): string {
       background: var(--panel);
     }
     .error { border-color: #f2bfba; background: var(--soft-warn); color: var(--warn); }
+    .verdict {
+      display: grid;
+      grid-template-columns: minmax(0, 1.4fr) minmax(340px, .8fr);
+      gap: 20px;
+      padding: 20px;
+      border-left-width: 6px;
+    }
+    .verdict.normal { border-left-color: var(--ok); background: #f8fcf9; }
+    .verdict.watch { border-left-color: var(--blue); background: #f7fbfd; }
+    .verdict.elevated { border-left-color: var(--watch); background: #fffaf0; }
+    .verdict.critical { border-left-color: var(--warn); background: #fff8f7; }
+    .eyebrow { color: var(--muted); font-size: 11px; font-weight: 800; letter-spacing: .07em; text-transform: uppercase; }
+    .verdict-title { display: flex; align-items: center; gap: 12px; margin-top: 8px; }
+    .verdict-title h2 { font-size: 28px; line-height: 1.1; }
+    .verdict-copy { margin: 9px 0 0; color: var(--muted); font-size: 14px; line-height: 1.45; }
+    .operator-action { display: inline-flex; margin-top: 14px; padding: 7px 10px; border-radius: 6px; background: var(--ink); color: #fff; font-size: 12px; font-weight: 800; }
+    .verdict-facts { display: grid; grid-template-columns: 1fr; align-content: center; }
+    .fact { display: grid; grid-template-columns: 130px 1fr; gap: 12px; padding: 9px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
+    .fact:last-child { border-bottom: 0; }
+    .fact-label { color: var(--muted); }
+    .fact-value { text-align: right; font-weight: 750; }
+    .change-panel { display: grid; grid-template-columns: minmax(260px, .9fr) minmax(0, 1.5fr); }
+    .change-copy { padding: 17px 18px; border-right: 1px solid var(--line); }
+    .change-copy h2 { margin-top: 7px; font-size: 18px; }
+    .change-copy p { margin: 6px 0 0; color: var(--muted); font-size: 12px; line-height: 1.45; }
+    .change-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .change-stat { padding: 17px 14px; border-right: 1px solid var(--line); }
+    .change-stat:last-child { border-right: 0; }
+    .change-value { margin-top: 8px; font-size: 22px; font-weight: 800; }
+    .change-label { color: var(--muted); font-size: 11px; line-height: 1.35; }
+    .stage-change-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+    .stage-change { padding: 4px 7px; border-radius: 5px; background: var(--soft-watch); color: var(--watch); font-size: 11px; font-weight: 750; }
+    .support {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    .support > summary {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 14px 16px;
+      cursor: pointer;
+      font-weight: 750;
+      list-style-position: inside;
+    }
+    .support > summary span { color: var(--muted); font-size: 12px; font-weight: 500; }
+    .support[open] > summary { border-bottom: 1px solid var(--line); }
+    .hard-rule { display: flex; gap: 10px; align-items: start; padding: 12px 14px; border: 1px solid #b8dec8; border-radius: 8px; background: var(--soft-ok); color: #245c3f; font-size: 12px; line-height: 1.45; }
     @media (max-width: 1120px) {
-      .metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+      .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .grid-2, .grid-3 { grid-template-columns: 1fr; }
       .pipeline { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-      .regions { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .verdict { grid-template-columns: 1fr; }
+      .change-panel { grid-template-columns: 1fr; }
+      .change-copy { border-right: 0; border-bottom: 1px solid var(--line); }
     }
     @media (max-width: 680px) {
       .shell { padding: 14px; }
       header { grid-template-columns: 1fr; }
       .statusbar { justify-content: flex-start; }
       .metrics, .pipeline, .regions { grid-template-columns: 1fr; }
-      h1 { font-size: 24px; }
+      .change-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .change-stat:nth-child(2) { border-right: 0; }
+      .change-stat:nth-child(-n+2) { border-bottom: 1px solid var(--line); }
+      .verdict { padding: 16px; }
+      .verdict-title h2 { font-size: 23px; }
+      .fact { grid-template-columns: 1fr auto; }
+      h1 { font-size: 22px; }
     }
   </style>
 </head>
@@ -392,12 +515,12 @@ export function dashboardHtml(): string {
     <header>
       <div>
         <h1>Geospace Watcher</h1>
-        <p class="subhead">Live engine view for the official-source geohazard watcher: ingestion, stale gate, cascade scoring, watch windows, and notification output.</p>
+        <p class="subhead">Official-source geohazard monitoring, freshness controls, cascade scoring, and live Slack output.</p>
       </div>
       <div id="statusbar" class="statusbar"></div>
     </header>
     <div id="app" class="loading">Loading live watcher state...</div>
-    <footer>Read-only dashboard. Data comes from persisted official-source records in Cloud SQL. Auto-refreshes every 30 seconds.</footer>
+    <footer>Read-only operator view. Auto-refreshes every 30 seconds from persisted official-source records.</footer>
   </div>
   <script>
     const app = document.getElementById("app");
@@ -422,18 +545,23 @@ export function dashboardHtml(): string {
       statusbar.innerHTML = [
         pill(data.system.mode === "live" ? "LIVE" : "DRY RUN", modeClass),
         pill("Official sources only", "ok"),
-        pill("Refresh " + data.system.pollIntervalMinutes + " min", "watch"),
-        pill("Updated " + fmtTime(data.generatedAt), "")
+        pill(data.system.pollIntervalMinutes + "-minute cadence", "watch"),
+        pill("Updated " + relative(data.generatedAt), "")
       ].join("");
 
       app.className = "";
       app.innerHTML = [
+        verdict(data),
+        latestCycle(data.latestCycle),
         metrics(data),
+        regions(data.regions),
         pipeline(data.pipeline),
-        "<div class=\\"grid-2\\">" + regions(data.regions) + sources(data.sources) + "</div>",
-        "<div class=\\"grid-3\\">" + activeWindows(data.activeWindows) + notifications(data.recentNotifications) + baselines(data.baselines) + "</div>",
+        "<div class=\\"grid-2\\">" + activeWindows(data.activeWindows.slice(0, 6)) + notifications(data.recentNotifications.slice(0, 6)) + "</div>",
+        sources(data.sources),
         recentEvents(data.recentEvents),
-        filteredEvents(data.filteredOfficialEvents)
+        "<div class=\\"grid-2\\">" + comparatorRegion(data.regions) + baselines(data.baselines) + "</div>",
+        filteredEvents(data.filteredOfficialEvents),
+        "<div class=\\"hard-rule\\"><strong>Alert guardrail</strong><span>" + esc(data.system.hardRule) + "</span></div>"
       ].join("");
     }
 
@@ -441,15 +569,49 @@ export function dashboardHtml(): string {
       return "<span class=\\"pill " + cls + "\\">" + esc(text) + "</span>";
     }
 
+    function verdict(data) {
+      const p = data.posture;
+      const sourceClass = p.sourceHealth === "healthy" ? "ok" : "warn";
+      const delivery = data.system.dryRun ? "Dry run; nothing posts" : data.system.notificationChannel === "unconfigured" ? "Not configured" : "Live and standing by";
+      return "<section class=\\"verdict " + escAttr(p.tone) + "\\">" +
+        "<div><div class=\\"eyebrow\\">Current operating posture</div><div class=\\"verdict-title\\"><span class=\\"stage " + escAttr(p.stage) + "\\">" + esc(p.stage) + "</span><h2>" + esc(p.label) + "</h2></div><p class=\\"verdict-copy\\">" + esc(p.detail) + "</p><span class=\\"operator-action\\">" + esc(p.action) + "</span></div>" +
+        "<div class=\\"verdict-facts\\">" +
+          fact("Official feeds", "<span class=\\"source-status " + sourceClass + "\\">" + esc(p.sourceHealth) + "</span> " + esc(p.sourceHealthDetail)) +
+          fact("Last official ingest", esc(relative(data.summary.latestIngestAt))) +
+          fact("Slack delivery", esc(delivery)) +
+        "</div>" +
+      "</section>";
+    }
+
+    function fact(label, valueHtml) {
+      return "<div class=\\"fact\\"><span class=\\"fact-label\\">" + esc(label) + "</span><span class=\\"fact-value\\">" + valueHtml + "</span></div>";
+    }
+
+    function latestCycle(cycle) {
+      const changes = cycle.stageChanges.length
+        ? "<div class=\\"stage-change-list\\">" + cycle.stageChanges.map((change) => "<span class=\\"stage-change\\">" + esc(change.label) + ": " + esc(change.fromStage) + " -> " + esc(change.toStage) + "</span>").join("") + "</div>"
+        : "";
+      return "<section class=\\"change-panel\\"><div class=\\"change-copy\\"><div class=\\"eyebrow\\">Since the latest scheduled run" + (cycle.completedAt ? " · " + esc(relative(cycle.completedAt)) : "") + "</div><h2>" + esc(cycle.headline) + "</h2><p>" + esc(cycle.detail) + "</p>" + changes + "</div>" +
+        "<div class=\\"change-stats\\">" +
+          changeStat(cycle.targetEventsIngested, "New target events") +
+          changeStat(cycle.stageChanges.length, "Region stage changes") +
+          changeStat(cycle.alertsSent, "Slack alerts") +
+          changeStat(cycle.sourceFailures.length, "Source failures") +
+        "</div></section>";
+    }
+
+    function changeStat(value, label) {
+      return "<div class=\\"change-stat\\"><div class=\\"change-label\\">" + esc(label) + "</div><div class=\\"change-value\\">" + esc(value) + "</div></div>";
+    }
+
     function metrics(data) {
       const s = data.summary;
+      const suppressed = Math.max(0, s.staleGateCheckedLast24h - s.staleGatePassedLast24h);
       return "<div class=\\"metrics\\">" +
-        metric("Current max stage", s.maxCurrentStage, "Highest latest stage across configured regions") +
-        metric("Events / 24h", s.eventsLast24h, "Live official-source events, excluding backfill") +
-        metric("Notifications / 24h", s.notificationsLast24h, data.system.notificationChannel) +
-        metric("Active windows", s.activeWindows, "Space-weather watch windows still open") +
-        metric("Stale gate", s.staleGatePassedLast24h + " / " + s.staleGateCheckedLast24h, "Passed checks; failed checks are suppressed before notification") +
-        metric("Last ingest", relative(s.latestIngestAt), fmtTime(s.latestIngestAt)) +
+        metric("Official events / 24h", s.eventsLast24h, "Live records; backfill excluded") +
+        metric("Slack alerts / 24h", s.notificationsLast24h, data.system.notificationChannel === "slack_bot" ? "Live #world-alerts delivery" : data.system.notificationChannel) +
+        metric("Space-weather context", s.activeWindows, "Open watch windows; not hazard alerts") +
+        metric("Old / ineligible checks blocked", suppressed, s.staleGatePassedLast24h + " fresh checks allowed through") +
       "</div>";
     }
 
@@ -464,13 +626,32 @@ export function dashboardHtml(): string {
     }
 
     function regions(items) {
-      return "<section><div class=\\"section-head\\"><h2>Configured region stages</h2><span class=\\"section-note\\">latest persisted cascade state</span></div><div class=\\"regions\\">" +
-        items.map((item) => "<div class=\\"region\\"><div class=\\"region-top\\"><div><div class=\\"region-name\\">" + esc(item.label) + "</div><div class=\\"micro\\">" + esc(item.comparatorOnly ? "Comparator only" : "Target region") + "</div></div><div class=\\"stage " + item.stage + "\\">" + item.stage + "</div></div><div class=\\"reason\\">" + esc(item.reason) + "</div><div class=\\"micro\\">Confidence " + pct(item.confidence) + " | Stale gate " + esc(item.staleGatePassed ? "passed" : "not passed") + "</div><div class=\\"micro\\">" + esc(item.stageStartedAt ? fmtTime(item.stageStartedAt) : "No state yet") + "</div></div>").join("") +
+      const targets = items
+        .filter((item) => !item.comparatorOnly)
+        .sort((a, b) => stageRank[b.stage] - stageRank[a.stage] || String(a.label).localeCompare(String(b.label)));
+      return "<section><div class=\\"section-head\\"><h2>Target regions</h2><span class=\\"section-note\\">highest urgency first · notification threshold begins at S3</span></div><div class=\\"regions\\">" +
+        targets.map(regionCard).join("") +
       "</div></section>";
     }
 
+    function regionCard(item) {
+      const event = item.latestEvent;
+      const signal = event ? (event.magnitude !== undefined ? "M" + Number(event.magnitude).toFixed(1) + " · " : "") + fmtTime(event.eventTime) : "";
+      const eventHtml = event
+        ? "<a href=\\"" + escAttr(event.officialUrl) + "\\" target=\\"_blank\\" rel=\\"noreferrer\\">" + esc(event.title) + "</a><div class=\\"micro\\">" + esc(event.sourceLabel) + " · " + esc(signal) + "</div>"
+        : "<span class=\\"micro\\">No linked official event yet.</span>";
+      const freshness = item.staleGatePassed ? "passed" : stageRank[item.stage] <= 1 ? "blocked old context" : "blocked";
+      return "<article class=\\"region " + escAttr(item.stage) + "\\"><div class=\\"region-top\\"><div><div class=\\"region-name\\">" + esc(item.label) + "</div><div class=\\"micro\\">" + esc(item.comparatorOnly ? "Comparison only" : "Target region") + "</div></div><div class=\\"stage " + escAttr(item.stage) + "\\">" + esc(item.stage) + " · " + esc(item.stageLabel) + "</div></div>" +
+        "<div class=\\"region-summary\\">" + esc(item.operatorSummary) + "</div>" +
+        "<div class=\\"region-event\\"><span class=\\"event-label\\">Latest linked official event</span>" + eventHtml + "</div>" +
+        "<div class=\\"threshold\\"><span class=\\"threshold-label\\">Configured alert signals</span>" + esc(item.alertThreshold) + "</div>" +
+        "<div class=\\"region-meta\\"><span>Freshness gate: " + esc(freshness) + "</span><span>Confidence: " + pct(item.confidence) + "</span><span>State: " + esc(item.stageStartedAt ? relative(item.stageStartedAt) : "not recorded") + "</span></div>" +
+        "<details class=\\"engine-reason\\"><summary>Engine reason</summary><div>" + esc(item.reason) + "</div></details></article>";
+    }
+
     function sources(items) {
-      return tableSection("Official source freshness", "latest source_runs rows", ["Source", "Status", "Records", "Completed", "Age", "Error"], items, (item) => [
+      const unhealthy = items.filter((item) => item.status !== "ok");
+      const table = tableMarkup(["Source", "Status", "Records", "Last completed", "Age", "Error"], items, (item) => [
         esc(item.label),
         "<span class=\\"source-status " + item.status + "\\">" + esc(item.status) + "</span>",
         esc(item.recordsSeen),
@@ -478,10 +659,11 @@ export function dashboardHtml(): string {
         esc(relative(item.completedAt || item.startedAt)),
         esc(item.error || "")
       ]);
+      return "<details class=\\"support\\"" + (unhealthy.length ? " open" : "") + "><summary>Official source health <span>" + esc(unhealthy.length ? unhealthy.length + " need attention" : items.length + "/" + items.length + " healthy") + "</span></summary>" + table + "</details>";
     }
 
     function activeWindows(items) {
-      return tableSection("Active watch windows", "space-weather S1 context", ["Trigger", "Ends", "Signals"], items, (item) => [
+      return tableSection("Space-weather context", "open windows; context only, not alerts", ["Trigger", "Ends", "Signals"], items, (item) => [
         esc(item.triggerType),
         esc(fmtTime(item.endsAt)),
         esc([item.kpMax !== undefined ? "Kp " + item.kpMax : "", item.flareClass || "", item.cmeArrivalTime ? "CME " + fmtTime(item.cmeArrivalTime) : ""].filter(Boolean).join(" | ") || "n/a")
@@ -489,7 +671,7 @@ export function dashboardHtml(): string {
     }
 
     function notifications(items) {
-      return tableSection("Recent notifications", "Slack/dry-run dedupe records", ["Sent", "Channel", "Title"], items, (item) => [
+      return tableSection("Recent alert output", "latest Slack/dry-run notification records", ["Sent", "Channel", "Alert"], items, (item) => [
         esc(fmtTime(item.sentAt)),
         esc(item.channel),
         "<span class=\\"title-cell\\">" + esc(item.title) + "</span>"
@@ -497,20 +679,30 @@ export function dashboardHtml(): string {
     }
 
     function baselines(items) {
-      return tableSection("Region baselines", "USGS FDSN backfill context", ["Region", "Window", "Avg/24h", "Samples"], items, (item) => [
+      const table = tableMarkup(["Region", "Window", "Avg/24h", "Samples"], items, (item) => [
         esc(item.label),
         esc(item.windowDays + "d"),
         esc(Number(item.value).toFixed(2)),
         esc(item.sampleCount)
       ]);
+      return "<details class=\\"support\\"><summary>Region baselines <span>USGS FDSN backfill context</span></summary>" + table + "</details>";
     }
 
     function recentEvents(items) {
-      return tableSection("Recent official events", "live source records, not backfill", ["Time", "Source", "Region", "Event", "M/Status"], items, eventRow);
+      return tableSection("Recent target-region events", "official live records linked to monitored regions", ["Event time", "Source", "Region", "Official event", "Signal"], items, eventRow);
     }
 
     function filteredEvents(items) {
-      return tableSection("Filtered official events", "stored but intentionally silent", ["Time", "Source", "Region", "Event", "M/Status"], items, eventRow);
+      const table = tableMarkup(["Event time", "Source", "Region", "Official event", "Signal"], items, eventRow);
+      return "<details class=\\"support\\"><summary>Filtered official events <span>" + esc(items.length) + " recent records stored but intentionally silent</span></summary>" + (items.length ? table : "<div class=\\"empty\\">No filtered records yet.</div>") + "</details>";
+    }
+
+    function comparatorRegion(items) {
+      const item = items.find((region) => region.comparatorOnly);
+      if (!item) {
+        return "<details class=\\"support\\"><summary>Comparator region <span>not configured</span></summary><div class=\\"empty\\">No comparator region is configured.</div></details>";
+      }
+      return "<details class=\\"support\\"><summary>Comparator region <span>" + esc(item.label) + " · " + esc(item.stage) + "</span></summary><div class=\\"regions\\" style=\\"grid-template-columns:1fr\\">" + regionCard(item) + "</div></details>";
     }
 
     function eventRow(item) {
@@ -528,11 +720,15 @@ export function dashboardHtml(): string {
       if (!items.length) {
         return "<section><div class=\\"section-head\\"><h2>" + esc(title) + "</h2><span class=\\"section-note\\">" + esc(note) + "</span></div><div class=\\"empty\\">No records yet.</div></section>";
       }
-      return "<section><div class=\\"section-head\\"><h2>" + esc(title) + "</h2><span class=\\"section-note\\">" + esc(note) + "</span></div><div class=\\"table-wrap\\"><table><thead><tr>" +
+      return "<section><div class=\\"section-head\\"><h2>" + esc(title) + "</h2><span class=\\"section-note\\">" + esc(note) + "</span></div>" + tableMarkup(headers, items, rowFn) + "</section>";
+    }
+
+    function tableMarkup(headers, items, rowFn) {
+      return "<div class=\\"table-wrap\\"><table><thead><tr>" +
         headers.map((header) => "<th>" + esc(header) + "</th>").join("") +
         "</tr></thead><tbody>" +
         items.map((item) => "<tr>" + rowFn(item).map((cell) => "<td>" + cell + "</td>").join("") + "</tr>").join("") +
-        "</tbody></table></div></section>";
+        "</tbody></table></div>";
     }
 
     function fmtTime(value) {
@@ -643,19 +839,230 @@ function latestCascadeByRegion(states: CascadeState[]): Map<string, CascadeState
   return byRegion;
 }
 
-function regionSummary(region: string, state?: CascadeState): RegionSummary {
+function regionSummary(rule: RegionRule, state?: CascadeState, latestEvent?: NormalizedEvent): RegionSummary {
   return {
-    region,
-    label: humanizeRegion(region),
+    region: rule.id,
+    label: humanizeRegion(rule.id),
     stage: state?.stage ?? "S0",
+    stageLabel: stageLabel(state?.stage ?? "S0"),
+    operatorSummary: regionOperatorSummary(state?.stage ?? "S0", state?.staleGatePassed ?? false),
     reason: state?.reason ?? "No recent cascade state recorded for this region.",
     confidence: state?.confidence ?? 0,
     staleGatePassed: state?.staleGatePassed ?? false,
     stageStartedAt: state?.stageStartedAt.toISOString(),
     latestEventId: state?.latestEventId,
+    latestEvent: latestEvent ? eventSummary(latestEvent) : undefined,
     activeWindowId: state?.activeWindowId,
-    comparatorOnly: region === "CARIBBEAN_VENEZUELA_COMPARATOR"
+    comparatorOnly: rule.id === "CARIBBEAN_VENEZUELA_COMPARATOR",
+    alertThreshold: alertThreshold(rule)
   };
+}
+
+function postureSummary(
+  regions: RegionSummary[],
+  sources: SourceSummary[]
+): DashboardData["posture"] {
+  const stage = maxRegionStage(regions.filter((region) => !region.comparatorOnly));
+  const degradedSources = sources.filter((source) => source.status !== "ok");
+  const sourceHealth = degradedSources.length ? "degraded" : "healthy";
+  const sourceHealthDetail = degradedSources.length
+    ? `${degradedSources.length} official source${degradedSources.length === 1 ? "" : "s"} need attention`
+    : `${sources.length}/${sources.length} official sources healthy`;
+
+  const postureByStage: Record<CascadeStage, Omit<DashboardData["posture"], "stage" | "sourceHealth" | "sourceHealthDetail">> = {
+    S0: {
+      label: "Normal monitoring",
+      action: "No action required",
+      detail: "No target region has a qualifying official-source signal.",
+      tone: "normal"
+    },
+    S1: {
+      label: "Watch only",
+      action: "No action required",
+      detail: "Space-weather context is active, but no target-region hazard signal has crossed a review threshold.",
+      tone: "watch"
+    },
+    S2: {
+      label: "Heightened context",
+      action: "Monitor closely",
+      detail: "A target-region signal is above baseline but remains below the notification threshold.",
+      tone: "watch"
+    },
+    S3: {
+      label: "Elevated watch",
+      action: "Review now",
+      detail: "A fresh target-region signal crossed the operator-review threshold.",
+      tone: "elevated"
+    },
+    S4: {
+      label: "High concern",
+      action: "Review now",
+      detail: "Confirmed official-source escalation requires immediate operator review.",
+      tone: "critical"
+    },
+    S5: {
+      label: "Action alert",
+      action: "Check the latest alert",
+      detail: "A high-confidence official-source event crossed the live notification threshold.",
+      tone: "critical"
+    }
+  };
+  const base = postureByStage[stage];
+
+  return {
+    stage,
+    ...base,
+    action: sourceHealth === "degraded" && stageRank(stage) < 3 ? "Check feed health" : base.action,
+    detail:
+      sourceHealth === "degraded" && stageRank(stage) < 3
+        ? `${base.detail} ${sourceHealthDetail}.`
+        : base.detail,
+    sourceHealth,
+    sourceHealthDetail
+  };
+}
+
+function latestCycleSummary(
+  config: WatcherConfig,
+  sourceRuns: SourceRun[],
+  events: NormalizedEvent[],
+  states: CascadeState[],
+  notifications: Array<{ sentAt: Date }>
+): DashboardData["latestCycle"] {
+  const scheduledRuns = sourceRuns.filter((run) =>
+    SCHEDULED_SOURCES.includes(run.source as (typeof SCHEDULED_SOURCES)[number])
+  );
+  const latestStartedAt = scheduledRuns
+    .map((run) => run.startedAt.getTime())
+    .sort((a, b) => b - a)[0];
+
+  if (latestStartedAt === undefined) {
+    return {
+      officialEventsIngested: 0,
+      targetEventsIngested: 0,
+      cascadeChecks: 0,
+      staleGatePassed: 0,
+      alertsSent: 0,
+      sourceFailures: [],
+      stageChanges: [],
+      materialChange: false,
+      headline: "Waiting for the first scheduled run",
+      detail: "No completed official-source cycle is recorded yet."
+    };
+  }
+
+  const groupingWindowMs = Math.min(5, Math.max(1, config.pollIntervalMinutes / 2)) * 60_000;
+  const cycleRuns = scheduledRuns.filter((run) => latestStartedAt - run.startedAt.getTime() <= groupingWindowMs);
+  const cycleStartedAt = new Date(Math.min(...cycleRuns.map((run) => run.startedAt.getTime())));
+  const completedTimes = cycleRuns
+    .map((run) => run.completedAt?.getTime())
+    .filter((time): time is number => time !== undefined);
+  const cycleCompletedAt = completedTimes.length ? new Date(Math.max(...completedTimes)) : undefined;
+  const cycleEnd = cycleCompletedAt?.getTime() ?? Number.POSITIVE_INFINITY;
+  const cycleEvents = events.filter(
+    (event) => event.ingestTime >= cycleStartedAt && event.ingestTime.getTime() <= cycleEnd + 60_000
+  );
+  const cycleStates = states.filter(
+    (state) => state.stageStartedAt >= cycleStartedAt && state.stageStartedAt.getTime() <= cycleEnd + 60_000
+  );
+  const cycleNotifications = notifications.filter(
+    (notification) => notification.sentAt >= cycleStartedAt && notification.sentAt.getTime() <= cycleEnd + 60_000
+  );
+  const sourceFailures = cycleRuns
+    .filter((run) => run.status === "error")
+    .map((run) => sourceLabel(run.source));
+  const stageChanges = changedRegionsForCycle(config, states, cycleStartedAt, cycleEnd);
+  const targetEventsIngested = cycleEvents.filter(
+    (event) => event.region && event.region !== "CARIBBEAN_VENEZUELA_COMPARATOR"
+  ).length;
+  const materialChange =
+    targetEventsIngested > 0 || stageChanges.length > 0 || cycleNotifications.length > 0 || sourceFailures.length > 0;
+
+  return {
+    startedAt: cycleStartedAt.toISOString(),
+    completedAt: cycleCompletedAt?.toISOString(),
+    officialEventsIngested: cycleEvents.length,
+    targetEventsIngested,
+    cascadeChecks: cycleStates.length,
+    staleGatePassed: cycleStates.filter((state) => state.staleGatePassed).length,
+    alertsSent: cycleNotifications.length,
+    sourceFailures,
+    stageChanges,
+    materialChange,
+    headline: materialChange ? "The latest run has items to review" : "No material change in the latest run",
+    detail: materialChange
+      ? `${targetEventsIngested} new target-region event${targetEventsIngested === 1 ? "" : "s"}, ${stageChanges.length} stage change${stageChanges.length === 1 ? "" : "s"}, ${cycleNotifications.length} alert${cycleNotifications.length === 1 ? "" : "s"}, and ${sourceFailures.length} source failure${sourceFailures.length === 1 ? "" : "s"}.`
+      : `${cycleEvents.length} official record${cycleEvents.length === 1 ? "" : "s"} ingested; no target-region stage changes, Slack alerts, or source failures.`
+  };
+}
+
+function changedRegionsForCycle(
+  config: WatcherConfig,
+  states: CascadeState[],
+  cycleStartedAt: Date,
+  cycleEnd: number
+): StageChangeSummary[] {
+  return config.regions
+    .filter((rule) => rule.id !== "CARIBBEAN_VENEZUELA_COMPARATOR")
+    .flatMap((rule) => {
+      const regionStates = states
+        .filter((state) => state.region === rule.id)
+        .sort((a, b) => a.stageStartedAt.getTime() - b.stageStartedAt.getTime());
+      const current = regionStates
+        .filter(
+          (state) => state.stageStartedAt >= cycleStartedAt && state.stageStartedAt.getTime() <= cycleEnd + 60_000
+        )
+        .at(-1);
+      const previous = regionStates.filter((state) => state.stageStartedAt < cycleStartedAt).at(-1);
+      if (!current || !previous || current.stage === previous.stage) {
+        return [];
+      }
+      return [
+        {
+          region: rule.id,
+          label: humanizeRegion(rule.id),
+          fromStage: previous.stage,
+          toStage: current.stage
+        }
+      ];
+    });
+}
+
+function regionOperatorSummary(stage: CascadeStage, staleGatePassed: boolean): string {
+  if (stage === "S0") {
+    return "No qualifying official signal.";
+  }
+  if (stage === "S1") {
+    return "Context watch only; no local signal crossed its threshold.";
+  }
+  if (!staleGatePassed) {
+    return "Signal suppressed because freshness checks did not pass.";
+  }
+  const summaries: Record<CascadeStage, string> = {
+    S0: "No qualifying official signal.",
+    S1: "Context watch only; no local signal crossed its threshold.",
+    S2: "Fresh signal above baseline; below the alert threshold.",
+    S3: "Fresh target-region signal requires operator review.",
+    S4: "Confirmed escalation requires immediate review.",
+    S5: "High-confidence event crossed the live alert threshold."
+  };
+  return summaries[stage];
+}
+
+function alertThreshold(rule: RegionRule): string {
+  if (rule.id === "CARIBBEAN_VENEZUELA_COMPARATOR") {
+    return "Comparison only; stored for baseline context and never alerts.";
+  }
+  const threshold = rule.alertThresholds;
+  const parts = [
+    threshold.mMinAlert !== undefined ? `M${threshold.mMinAlert.toFixed(1)}+` : undefined,
+    threshold.swarmCount24h !== undefined ? `${threshold.swarmCount24h} quakes/24h` : undefined,
+    threshold.swarmRateXBaseline !== undefined ? `${threshold.swarmRateXBaseline}x baseline` : undefined,
+    threshold.shallowDepthKmMax !== undefined ? `depth <= ${threshold.shallowDepthKmMax} km` : undefined,
+    threshold.tsunamiCheck ? "tsunami check" : undefined,
+    threshold.escalateIfHansNotNormal ? "HANS above NORMAL" : undefined
+  ].filter((part): part is string => Boolean(part));
+  return parts.join(" | ");
 }
 
 function eventSummary(event: NormalizedEvent): EventSummary {
@@ -792,7 +1199,33 @@ function stageRank(stage: CascadeStage): number {
   return Number(stage.slice(1));
 }
 
+function stageLabel(stage: CascadeStage): string {
+  const labels: Record<CascadeStage, string> = {
+    S0: "Normal",
+    S1: "Watch",
+    S2: "Heightened",
+    S3: "Elevated",
+    S4: "High concern",
+    S5: "Action"
+  };
+  return labels[stage];
+}
+
 function humanizeRegion(region: string): string {
+  const labels: Record<string, string> = {
+    CASCADE_VOLCANOES_RAINIER: "Mount Rainier",
+    CASCADE_VOLCANOES_ST_HELENS: "Mount St. Helens",
+    CASCADE_VOLCANOES_HOOD_ADAMS_BAKER: "Mount Hood / Adams / Baker",
+    YELLOWSTONE: "Yellowstone",
+    NORCAL_OFFSHORE_MENDOCINO_BLANCO: "Mendocino / Blanco Offshore",
+    PNW_CASCADIA_OFFSHORE: "Cascadia Offshore (PNW)",
+    WESTERN_WA_SEATTLE_WHIDBEY: "Western Washington / Seattle / Whidbey",
+    CALIFORNIA_FAULTS: "California Faults",
+    CARIBBEAN_VENEZUELA_COMPARATOR: "Caribbean / Venezuela Comparator"
+  };
+  if (labels[region]) {
+    return labels[region];
+  }
   return region
     .split("_")
     .map((part) => part.charAt(0) + part.slice(1).toLowerCase())
