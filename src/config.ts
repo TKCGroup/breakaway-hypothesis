@@ -21,6 +21,7 @@ export interface RegionRule {
 export interface WatcherConfig {
   dryRun: boolean;
   pollIntervalMinutes: number;
+  baselineMinMagnitude: number;
   nasaApiKey?: string;
   notifyWebhookUrl?: string;
   slackBotToken?: string;
@@ -65,6 +66,7 @@ export const OFFICIAL_SOURCES = new Set<OfficialSource>([
 export const DEFAULT_CONFIG: WatcherConfig = {
   dryRun: true,
   pollIntervalMinutes: 15,
+  baselineMinMagnitude: 0,
   freshness: {
     maxEventAgeHours: 12,
     sourceStaleHours: {
@@ -202,6 +204,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): WatcherConfig 
     ...DEFAULT_CONFIG,
     dryRun: env.DRY_RUN !== "false",
     pollIntervalMinutes: Number(env.POLL_INTERVAL_MINUTES ?? DEFAULT_CONFIG.pollIntervalMinutes),
+    baselineMinMagnitude: Number(
+      env.BASELINE_MIN_MAGNITUDE ?? DEFAULT_CONFIG.baselineMinMagnitude
+    ),
     nasaApiKey: env.NASA_API_KEY,
     notifyWebhookUrl: env.NOTIFY_WEBHOOK_URL,
     slackBotToken: env.SLACK_BOT_TOKEN,

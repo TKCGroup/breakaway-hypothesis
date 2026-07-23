@@ -4,6 +4,27 @@ import { createSpaceWeatherWindow, evaluateCascade } from "../logic/cascade.js";
 import { eventFixture, NOW } from "./helpers.js";
 
 describe("cascade", () => {
+  it("compares live and baseline activity at the same magnitude floor", () => {
+    const comparison = compareRegionalRate(
+      "CASCADE_VOLCANOES_RAINIER",
+      [
+        eventFixture({ id: "positive", magnitude: 0.4 }),
+        eventFixture({ id: "negative", magnitude: -0.3 }),
+        eventFixture({
+          id: "hans",
+          eventType: "volcano_notice",
+          magnitude: 1
+        })
+      ],
+      0.5,
+      NOW,
+      0
+    );
+
+    expect(comparison.currentCount24h).toBe(1);
+    expect(comparison.rateMultiple).toBe(1);
+  });
+
   it("Kp6 alone creates S1 window and sends no alert", () => {
     const kpEvent = eventFixture({
       id: "kp-1",
@@ -77,6 +98,7 @@ describe("cascade", () => {
     expect(baseline.rateMultiple).toBe(4);
     expect(state.stage).toBe("S3");
     expect(state.shouldNotify).toBe(true);
+    expect(state.reason).toContain("4.0x baseline (20 quakes/24h)");
   });
 
   it("does not promote official global M5+ earthquakes outside configured regions", () => {

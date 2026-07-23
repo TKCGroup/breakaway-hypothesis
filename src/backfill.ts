@@ -41,7 +41,7 @@ export async function runBaselineBackfill(
   const startedAt = options.now ?? new Date();
   const config = options.config ?? loadConfig();
   const windowDays = options.windowDays ?? baselineWindowDaysFromEnv();
-  const minMagnitude = options.minMagnitude ?? Number(process.env.BASELINE_MIN_MAGNITUDE ?? 0);
+  const minMagnitude = options.minMagnitude ?? config.baselineMinMagnitude;
   const seenEvents = new Set<string>();
   const regions: BaselineBackfillRegionSummary[] = [];
   let eventsUpserted = 0;

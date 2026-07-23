@@ -82,4 +82,14 @@
 - [x] Rename stale-gate and watch-window metrics so suppression and context are understandable at a glance.
 - [x] Move healthy source detail and engine internals below the primary triage surface.
 - [x] Verify desktop and mobile layouts, then pass `pnpm typecheck`, `pnpm test`, and `pnpm build`.
-- [ ] Push the verified change and request production deployment from Altbot.
+- [x] Push the verified change and request production deployment from Altbot.
+
+## Region Activity Context — 2026-07-23
+
+- [x] Select the strongest fresh state when multiple region states share the same scheduler timestamp.
+- [x] Treat stale elevated states as blocked candidates instead of actionable posture.
+- [x] Add a 90-day official-USGS spark timeline with current 24-hour count, percentile, prior equal-or-higher window, recent peak, and configured absolute threshold.
+- [x] Add official CVO historical context for Mount St. Helens without using news/search/social inputs.
+- [x] Suppress repeated S3 regional-rate notifications for distinct microquake events inside the configured duplicate window.
+- [x] Align live and historical counts to the same configured `M0.0+` catalog floor.
+- [x] Pass typecheck, 59 tests, build, and responsive visual verification before requesting live deployment.

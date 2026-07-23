@@ -76,6 +76,60 @@ describe("notifier", () => {
     expect(second.reason).toBe("duplicate_stage");
   });
 
+  it("suppresses distinct microquakes from the same regional-rate episode", async () => {
+    const notifier = new DryRunNotifier({ dryRun: true, suppressDuplicateHours: 24, now: NOW });
+    const state = cascadeFixture({
+      reason: "quake rate 5.0x baseline (5 quakes/24h) during active S1 window"
+    });
+    const first = await notifier.notify(eventFixture(), state);
+    const second = await notifier.notify(
+      eventFixture({
+        id: "evt-2",
+        externalId: "uw-second-microquake",
+        title: "M 0.8 - Mount St. Helens",
+        region: "CASCADE_VOLCANOES_RAINIER"
+      }),
+      { ...state, id: "cascade-2", latestEventId: "evt-2" }
+    );
+
+    expect(first.payload?.dedupeKey).toBe("CASCADE_VOLCANOES_RAINIER:regional-rate");
+    expect(first.payload?.title).toContain("S3 regional-rate watch - Mount Rainier");
+    expect(second.suppressed).toBe(true);
+    expect(second.reason).toBe("duplicate_stage");
+  });
+
+  it("keeps distinct major-event alerts event-specific", async () => {
+    const notifier = new DryRunNotifier({ dryRun: true, suppressDuplicateHours: 24, now: NOW });
+    const state = cascadeFixture({
+      region: "PNW_CASCADIA_OFFSHORE",
+      stage: "S5",
+      reason: "M5.0 target-region earthquake; tsunami feed status=none"
+    });
+    const first = await notifier.notify(
+      eventFixture({
+        id: "major-1",
+        externalId: "us-major-1",
+        region: "PNW_CASCADIA_OFFSHORE",
+        magnitude: 5
+      }),
+      { ...state, latestEventId: "major-1" }
+    );
+    const second = await notifier.notify(
+      eventFixture({
+        id: "major-2",
+        externalId: "us-major-2",
+        region: "PNW_CASCADIA_OFFSHORE",
+        magnitude: 5.6
+      }),
+      { ...state, id: "cascade-major-2", latestEventId: "major-2" }
+    );
+
+    expect(first.suppressed).toBe(false);
+    expect(second.suppressed).toBe(false);
+    expect(first.payload?.dedupeKey).toContain("us-major-1");
+    expect(second.payload?.dedupeKey).toContain("us-major-2");
+  });
+
   it("re-notifies only if stage increases or new major event occurs", async () => {
     const notifier = new DryRunNotifier({ dryRun: true, suppressDuplicateHours: 24, now: NOW });
     const event = eventFixture();
@@ -198,6 +252,50 @@ describe("notifier", () => {
 
       expect(result.sent).toBe(false);
       expect(result.suppressed).toBe(true);
+      expect(result.reason).toBe("persistent_duplicate");
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("recognizes legacy event-specific records for a regional-rate episode", async () => {
+    const originalFetch = globalThis.fetch;
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ ok: true })));
+    globalThis.fetch = fetchMock as typeof fetch;
+    const event = eventFixture({
+      id: "evt-new",
+      externalId: "uw-new-microquake",
+      region: "CASCADE_VOLCANOES_ST_HELENS"
+    });
+    const state = cascadeFixture({
+      id: "cascade-new",
+      region: "CASCADE_VOLCANOES_ST_HELENS",
+      latestEventId: event.id,
+      reason: "quake rate 5.0x baseline (5 quakes/24h) during active S1 window"
+    });
+
+    try {
+      const notifier = new DryRunNotifier({
+        dryRun: false,
+        slackBotToken: "xoxb-test-token",
+        slackChannelId: "C0AS8NB0LQY",
+        suppressDuplicateHours: 24,
+        now: NOW
+      });
+      const result = await notifier.notify(event, state, [
+        {
+          id: "notification-legacy",
+          cascadeStateId: "cascade-old",
+          sentAt: new Date(NOW.getTime() - 60_000),
+          channel: "slack_bot",
+          title: "GEOSPACE WATCH: S3 escalation - M 0.8 - Mount St. Helens",
+          body: "*Why this fired:* quake rate 5.0x baseline during active S1 window",
+          dedupeKey: "CASCADE_VOLCANOES_ST_HELENS:uw-old-microquake:S3"
+        }
+      ]);
+
+      expect(result.sent).toBe(false);
       expect(result.reason).toBe("persistent_duplicate");
       expect(fetchMock).not.toHaveBeenCalled();
     } finally {

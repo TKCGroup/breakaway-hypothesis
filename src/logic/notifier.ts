@@ -57,7 +57,8 @@ export class DryRunNotifier {
     const channel = this.resolveChannel();
     const persistedDuplicate = findRecentPersistedDuplicate(
       previousNotifications,
-      notificationDedupeKey(payload, state),
+      payload,
+      state,
       channel,
       now,
       this.options.suppressDuplicateHours
@@ -137,19 +138,31 @@ export function notificationDedupeKey(payload: AlertPayload, state: CascadeState
 
 function findRecentPersistedDuplicate(
   notifications: PersistedNotificationRecord[],
-  dedupeKey: string,
+  payload: AlertPayload,
+  state: CascadeState,
   channel: NotificationChannel,
   now: Date,
   suppressDuplicateHours: number
 ): PersistedNotificationRecord | undefined {
   const suppressMs = suppressDuplicateHours * 3_600_000;
   const channels = channel === "dry_run" ? new Set(["dry_run"]) : new Set(["slack_bot", "webhook"]);
-  return notifications.find(
-    (notification) =>
-      notification.dedupeKey === dedupeKey &&
-      channels.has(notification.channel) &&
-      now.getTime() - notification.sentAt.getTime() < suppressMs
-  );
+  const dedupeKey = notificationDedupeKey(payload, state);
+  const regionalRate = isRegionalRateAlert(state);
+  return notifications.find((notification) => {
+    const ageMs = now.getTime() - notification.sentAt.getTime();
+    if (!channels.has(notification.channel) || ageMs < 0 || ageMs >= suppressMs) {
+      return false;
+    }
+    if (notification.dedupeKey === dedupeKey) {
+      return true;
+    }
+    return (
+      regionalRate &&
+      notification.dedupeKey.startsWith(`${state.region}:`) &&
+      notification.dedupeKey.endsWith(`:${state.stage}`) &&
+      notification.body.toLowerCase().includes("quake rate")
+    );
+  });
 }
 
 export function buildSlackBotPostPayload(payload: AlertPayload, channel: string): SlackBotPostPayload {
@@ -180,9 +193,12 @@ export function buildSlackWebhookPayload(payload: AlertPayload): SlackWebhookPay
 
 export function buildAlertPayload(event: NormalizedEvent, state: CascadeState, dryRun: boolean): AlertPayload {
   const staleGateResult = state.staleGatePassed ? "passed" : `failed:${state.staleGate.reasons.join("|")}`;
-  const title = `GEOSPACE WATCH: ${state.stage} ${stageName(state.stage)} - ${event.title}`;
+  const regionalRate = isRegionalRateAlert(state);
+  const title = regionalRate
+    ? `GEOSPACE WATCH: ${state.stage} regional-rate watch - ${humanizeRegion(state.region)}`
+    : `GEOSPACE WATCH: ${state.stage} ${stageName(state.stage)} - ${event.title}`;
   const body = [
-    `*Event:* ${event.title}`,
+    `*${regionalRate ? "Latest trigger event" : "Event"}:* ${event.title}`,
     `*Region:* ${humanizeRegion(state.region)}`,
     `*Why this fired:* ${state.reason}`,
     ...eventDetailLines(event),
@@ -196,7 +212,9 @@ export function buildAlertPayload(event: NormalizedEvent, state: CascadeState, d
   return {
     title,
     body,
-    dedupeKey: `${event.region ?? state.region}:${event.externalId}`,
+    dedupeKey: regionalRate
+      ? `${state.region}:regional-rate`
+      : `${event.region ?? state.region}:${event.externalId}`,
     dryRun,
     requiredFields: {
       source: event.source,
@@ -208,6 +226,10 @@ export function buildAlertPayload(event: NormalizedEvent, state: CascadeState, d
       stale_gate_result: staleGateResult
     }
   };
+}
+
+function isRegionalRateAlert(state: CascadeState): boolean {
+  return state.stage === "S3" && state.reason.toLowerCase().startsWith("quake rate ");
 }
 
 function eventDetailLines(event: NormalizedEvent): string[] {
@@ -231,6 +253,20 @@ function eventDetailLines(event: NormalizedEvent): string[] {
 }
 
 function humanizeRegion(region: string): string {
+  const labels: Record<string, string> = {
+    CASCADE_VOLCANOES_RAINIER: "Mount Rainier",
+    CASCADE_VOLCANOES_ST_HELENS: "Mount St. Helens",
+    CASCADE_VOLCANOES_HOOD_ADAMS_BAKER: "Mount Hood / Adams / Baker",
+    YELLOWSTONE: "Yellowstone",
+    NORCAL_OFFSHORE_MENDOCINO_BLANCO: "Mendocino / Blanco Offshore",
+    PNW_CASCADIA_OFFSHORE: "Cascadia Offshore (PNW)",
+    WESTERN_WA_SEATTLE_WHIDBEY: "Western Washington / Seattle / Whidbey",
+    CALIFORNIA_FAULTS: "California Faults",
+    CARIBBEAN_VENEZUELA_COMPARATOR: "Caribbean / Venezuela Comparator"
+  };
+  if (labels[region]) {
+    return labels[region];
+  }
   return region
     .split("_")
     .map((part) => part.charAt(0) + part.slice(1).toLowerCase())

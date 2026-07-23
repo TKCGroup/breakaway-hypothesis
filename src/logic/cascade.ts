@@ -123,7 +123,7 @@ export function evaluateCascade(input: CascadeInput): CascadeState {
         shouldNotify = true;
       } else if (activeWindow && isShallow && crossesRate) {
         stage = "S3";
-        reason = `quake rate ${rateMultiple.toFixed(1)}x baseline during active S1 window`;
+        reason = `quake rate ${rateMultiple.toFixed(1)}x baseline (${count24h} quakes/24h) during active S1 window`;
         confidence = 0.75;
         shouldNotify = true;
       } else if (activeWindow && (crossesRate || crossesCount)) {

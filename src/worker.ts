@@ -87,7 +87,13 @@ export async function runOnce(now = new Date(), repo: WatcherRepository = new In
     const state = evaluateCascade({
       event,
       activeWindows: windows,
-      baseline: baselineForEvent(event, events, baselines, now),
+      baseline: baselineForEvent(
+        event,
+        events,
+        baselines,
+        now,
+        config.baselineMinMagnitude
+      ),
       now,
       config,
       tsunamiStatus
@@ -145,7 +151,8 @@ function baselineForEvent(
   event: NormalizedEvent,
   events: NormalizedEvent[],
   baselines: RegionBaseline[],
-  now: Date
+  now: Date,
+  minMagnitude: number
 ) {
   if (event.eventType !== "earthquake" || !event.region) {
     return undefined;
@@ -156,7 +163,13 @@ function baselineForEvent(
     return undefined;
   }
 
-  return compareRegionalRate(event.region, events, baseline.value, now);
+  return compareRegionalRate(
+    event.region,
+    events,
+    baseline.value,
+    now,
+    minMagnitude
+  );
 }
 
 function bestBaselineForRegion(region: RegionId, baselines: RegionBaseline[]): RegionBaseline | undefined {

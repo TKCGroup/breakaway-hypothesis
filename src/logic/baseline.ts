@@ -11,11 +11,17 @@ export function compareRegionalRate(
   region: RegionId,
   recentEvents: NormalizedEvent[],
   baselineCount24h: number,
-  now = new Date()
+  now = new Date(),
+  minMagnitude = 0
 ): BaselineComparison {
   const dayAgo = now.getTime() - 24 * 3_600_000;
   const currentCount24h = recentEvents.filter(
-    (event) => event.region === region && event.eventTime.getTime() >= dayAgo
+    (event) =>
+      event.region === region &&
+      event.eventType === "earthquake" &&
+      event.magnitude !== undefined &&
+      event.magnitude >= minMagnitude &&
+      event.eventTime.getTime() >= dayAgo
   ).length;
   const denominator = Math.max(1, baselineCount24h);
 

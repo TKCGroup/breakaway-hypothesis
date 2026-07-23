@@ -37,6 +37,7 @@ interface RegionSummary {
   region: string;
   label: string;
   stage: CascadeStage;
+  effectiveStage: CascadeStage;
   stageLabel: string;
   operatorSummary: string;
   reason: string;
@@ -48,6 +49,7 @@ interface RegionSummary {
   activeWindowId?: string;
   comparatorOnly: boolean;
   alertThreshold: string;
+  activity?: RegionActivitySummary;
 }
 
 interface EventSummary {
@@ -99,6 +101,41 @@ interface BaselineSummary {
   computedAt: string;
   value: number;
   sampleCount: number;
+}
+
+interface ActivityPoint {
+  date: string;
+  count: number;
+  maxMagnitude?: number;
+}
+
+interface ActivityComparisonPoint {
+  endedAt: string;
+  count: number;
+}
+
+interface OfficialContextReference {
+  title: string;
+  source: string;
+  publishedAt: string;
+  metric: string;
+  officialUrl: string;
+}
+
+interface RegionActivitySummary {
+  historyDays: number;
+  sparkWindowDays: number;
+  catalogMinMagnitude: number;
+  currentCount24h: number;
+  currentMaxMagnitude?: number;
+  baselineCount24h: number;
+  rateMultiple: number;
+  percentile: number;
+  previousAtOrAbove?: ActivityComparisonPoint;
+  recentPeak: ActivityComparisonPoint;
+  absoluteThreshold?: number;
+  sparkline: ActivityPoint[];
+  officialContext: OfficialContextReference[];
 }
 
 interface StageChangeSummary {
@@ -185,14 +222,20 @@ export async function buildDashboardData(
   const liveEvents = events
     .filter((event) => event.source !== "usgs_fdsn_backfill")
     .sort((a, b) => b.ingestTime.getTime() - a.ingestTime.getTime());
-  const eventsById = new Map(liveEvents.map((event) => [event.id, event]));
-  const cascadeByRegion = latestCascadeByRegion(cascadeStates);
+  const eventsById = new Map(events.map((event) => [event.id, event]));
+  const cascadeByRegion = latestCascadeByRegion(cascadeStates, eventsById);
+  const activityByRegion = regionActivitySummaries(config, events, baselines, now);
   const regions = config.regions.map((rule) => {
     const state = cascadeByRegion.get(rule.id);
-    return regionSummary(rule, state, state ? eventsById.get(state.latestEventId) : undefined);
+    return regionSummary(
+      rule,
+      state,
+      state ? eventsById.get(state.latestEventId) : undefined,
+      activityByRegion.get(rule.id)
+    );
   });
   const sources = sourceSummaries(sourceRuns, liveEvents, config, now);
-  const latestCycle = latestCycleSummary(config, sourceRuns, liveEvents, cascadeStates, notifications);
+  const latestCycle = latestCycleSummary(config, sourceRuns, liveEvents, cascadeStates, notifications, eventsById);
   const posture = postureSummary(regions, sources);
   const latestRunCompletedAt = latestCycle.completedAt ?? maxIso(sourceRuns.map((run) => run.completedAt));
   const latestIngestAt = maxIso(liveEvents.map((event) => event.ingestTime));
@@ -408,6 +451,51 @@ export function dashboardHtml(): string {
     .region-meta { display: flex; flex-wrap: wrap; gap: 6px 12px; color: var(--muted); font-size: 11px; }
     .engine-reason { color: var(--muted); font-size: 11px; }
     .engine-reason summary { cursor: pointer; }
+    .stage.blocked { background: #6f776f; }
+    .activity {
+      margin-top: 2px;
+      border-top: 1px solid var(--line);
+      padding-top: 10px;
+    }
+    .activity > summary {
+      cursor: pointer;
+      color: var(--ink);
+      font-size: 12px;
+      font-weight: 750;
+    }
+    .activity-body { display: grid; gap: 11px; padding-top: 11px; }
+    .activity-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+    .activity-stat { min-width: 0; padding-right: 8px; border-right: 1px solid var(--line); }
+    .activity-stat:last-child { border-right: 0; padding-right: 0; }
+    .activity-value { font-size: 17px; font-weight: 800; line-height: 1.15; }
+    .activity-label { margin-top: 4px; color: var(--muted); font-size: 10px; line-height: 1.3; }
+    .spark-wrap { display: grid; gap: 5px; }
+    .spark {
+      height: 62px;
+      display: flex;
+      align-items: end;
+      gap: 1px;
+      padding: 6px 5px 0;
+      border-bottom: 1px solid var(--line);
+      background: #fafbf9;
+      overflow: hidden;
+    }
+    .spark-bar {
+      flex: 1 1 2px;
+      min-width: 1px;
+      max-width: 10px;
+      background: #9bbcaf;
+      border-radius: 2px 2px 0 0;
+    }
+    .spark-bar.current { background: var(--stage3); }
+    .spark-labels { display: flex; justify-content: space-between; color: var(--muted); font-size: 9px; }
+    .threshold-track { height: 7px; border-radius: 4px; background: #e7ece6; overflow: hidden; }
+    .threshold-fill { height: 100%; background: var(--stage3); border-radius: inherit; }
+    .activity-read { margin: 0; font-size: 11px; font-weight: 700; line-height: 1.4; }
+    .activity-caveat { margin: 0; color: var(--muted); font-size: 10px; line-height: 1.4; }
+    .official-context { display: grid; gap: 6px; padding-top: 9px; border-top: 1px solid var(--line); }
+    .official-context a { font-size: 11px; font-weight: 700; }
+    .official-context span { display: block; color: var(--muted); font-size: 10px; line-height: 1.35; }
     table { width: 100%; border-collapse: collapse; font-size: 13px; }
     th, td { padding: 10px 12px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
     th { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; background: #fafbf9; }
@@ -507,6 +595,9 @@ export function dashboardHtml(): string {
       .verdict-title h2 { font-size: 23px; }
       .fact { grid-template-columns: 1fr auto; }
       h1 { font-size: 22px; }
+      .activity-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .activity-stat:nth-child(2) { border-right: 0; }
+      .activity-stat:nth-child(-n+2) { padding-bottom: 7px; border-bottom: 1px solid var(--line); }
     }
   </style>
 </head>
@@ -628,7 +719,7 @@ export function dashboardHtml(): string {
     function regions(items) {
       const targets = items
         .filter((item) => !item.comparatorOnly)
-        .sort((a, b) => stageRank[b.stage] - stageRank[a.stage] || String(a.label).localeCompare(String(b.label)));
+        .sort((a, b) => stageRank[b.effectiveStage] - stageRank[a.effectiveStage] || String(a.label).localeCompare(String(b.label)));
       return "<section><div class=\\"section-head\\"><h2>Target regions</h2><span class=\\"section-note\\">highest urgency first · notification threshold begins at S3</span></div><div class=\\"regions\\">" +
         targets.map(regionCard).join("") +
       "</div></section>";
@@ -641,12 +732,73 @@ export function dashboardHtml(): string {
         ? "<a href=\\"" + escAttr(event.officialUrl) + "\\" target=\\"_blank\\" rel=\\"noreferrer\\">" + esc(event.title) + "</a><div class=\\"micro\\">" + esc(event.sourceLabel) + " · " + esc(signal) + "</div>"
         : "<span class=\\"micro\\">No linked official event yet.</span>";
       const freshness = item.staleGatePassed ? "passed" : stageRank[item.stage] <= 1 ? "blocked old context" : "blocked";
-      return "<article class=\\"region " + escAttr(item.stage) + "\\"><div class=\\"region-top\\"><div><div class=\\"region-name\\">" + esc(item.label) + "</div><div class=\\"micro\\">" + esc(item.comparatorOnly ? "Comparison only" : "Target region") + "</div></div><div class=\\"stage " + escAttr(item.stage) + "\\">" + esc(item.stage) + " · " + esc(item.stageLabel) + "</div></div>" +
+      const blockedCandidate = !item.staleGatePassed && stageRank[item.stage] >= 2;
+      const visualStage = blockedCandidate ? item.effectiveStage : item.stage;
+      const stageText = blockedCandidate ? "Candidate " + item.stage + " · blocked" : item.stage + " · " + item.stageLabel;
+      return "<article class=\\"region " + escAttr(visualStage) + "\\"><div class=\\"region-top\\"><div><div class=\\"region-name\\">" + esc(item.label) + "</div><div class=\\"micro\\">" + esc(item.comparatorOnly ? "Comparison only" : "Target region") + "</div></div><div class=\\"stage " + escAttr(visualStage) + (blockedCandidate ? " blocked" : "") + "\\">" + esc(stageText) + "</div></div>" +
         "<div class=\\"region-summary\\">" + esc(item.operatorSummary) + "</div>" +
         "<div class=\\"region-event\\"><span class=\\"event-label\\">Latest linked official event</span>" + eventHtml + "</div>" +
         "<div class=\\"threshold\\"><span class=\\"threshold-label\\">Configured alert signals</span>" + esc(item.alertThreshold) + "</div>" +
+        activityContext(item.activity, item, blockedCandidate) +
         "<div class=\\"region-meta\\"><span>Freshness gate: " + esc(freshness) + "</span><span>Confidence: " + pct(item.confidence) + "</span><span>State: " + esc(item.stageStartedAt ? relative(item.stageStartedAt) : "not recorded") + "</span></div>" +
         "<details class=\\"engine-reason\\"><summary>Engine reason</summary><div>" + esc(item.reason) + "</div></details></article>";
+    }
+
+    function activityContext(activity, item, blockedCandidate) {
+      if (!activity) {
+        return "";
+      }
+      const counts = activity.sparkline.map((point) => Number(point.count) || 0);
+      const maxCount = Math.max(1, ...counts);
+      const bars = activity.sparkline.map((point, index) => {
+        const height = point.count === 0 ? 3 : Math.max(8, Math.round((point.count / maxCount) * 100));
+        const current = index === activity.sparkline.length - 1 ? " current" : "";
+        const title = shortDate(point.date) + ": " + point.count + " quake" + (point.count === 1 ? "" : "s") + "/24h";
+        return "<span class=\\"spark-bar" + current + "\\" style=\\"height:" + height + "%\\" title=\\"" + escAttr(title) + "\\"></span>";
+      }).join("");
+      const prior = activity.previousAtOrAbove
+        ? shortDate(activity.previousAtOrAbove.endedAt) + " · " + activity.previousAtOrAbove.count + "/24h"
+        : "None in " + activity.historyDays + "d";
+      const peak = shortDate(activity.recentPeak.endedAt) + " · " + activity.recentPeak.count + "/24h";
+      const threshold = activity.absoluteThreshold;
+      const thresholdProgress = threshold ? Math.min(100, Math.round((activity.currentCount24h / threshold) * 100)) : 0;
+      const thresholdText = threshold ? activity.currentCount24h + " of " + threshold + "/24h" : "Rate only";
+      const interpretation = threshold && activity.currentCount24h >= threshold
+        ? "At or above the configured absolute swarm-count threshold; review the official event sequence."
+        : activity.percentile >= 90
+          ? "Elevated relative to the recent USGS catalog, but below the configured absolute swarm threshold."
+          : "Within the middle of the recent USGS catalog and below the configured absolute swarm threshold.";
+      const references = activity.officialContext.length
+        ? "<div class=\\"official-context\\"><span class=\\"threshold-label\\">Official Mount St. Helens comparison points</span>" +
+          activity.officialContext.map((reference) =>
+            "<div><a href=\\"" + escAttr(reference.officialUrl) + "\\" target=\\"_blank\\" rel=\\"noreferrer\\">" + esc(reference.source + " · " + reference.publishedAt.slice(0, 4)) + "</a><span>" + esc(reference.metric) + "</span></div>"
+          ).join("") + "</div>"
+        : "";
+      const open = stageRank[item.effectiveStage] >= 2 || blockedCandidate ? " open" : "";
+      return "<details class=\\"activity\\"" + open + "><summary>Activity context · " + activity.currentCount24h + " earthquakes / 24h</summary><div class=\\"activity-body\\">" +
+        "<div class=\\"activity-stats\\">" +
+          activityStat(activity.currentCount24h + "/24h", "Current official count" + (activity.currentMaxMagnitude !== undefined ? " · largest M" + Number(activity.currentMaxMagnitude).toFixed(1) : "")) +
+          activityStat(activity.percentile + "th", "Percentile vs prior daily windows") +
+          activityStat(prior, "Previous window at least this active") +
+          activityStat(peak, "Recent " + activity.historyDays + "d peak") +
+        "</div>" +
+        "<div class=\\"spark-wrap\\"><div class=\\"spark\\" aria-label=\\"" + escAttr(activity.sparkWindowDays + "-day earthquake activity timeline") + "\\">" + bars + "</div><div class=\\"spark-labels\\"><span>" + esc(shortDate(activity.sparkline[0] && activity.sparkline[0].date)) + "</span><span>rolling 24h · USGS M" + esc(Number(activity.catalogMinMagnitude).toFixed(1)) + "+</span><span>Now</span></div></div>" +
+        "<div><div class=\\"threshold\\"><span class=\\"threshold-label\\">Absolute swarm threshold · " + esc(thresholdText) + "</span></div><div class=\\"threshold-track\\"><div class=\\"threshold-fill\\" style=\\"width:" + thresholdProgress + "%\\"></div></div></div>" +
+        "<p class=\\"activity-read\\">" + esc(interpretation) + "</p>" +
+        "<p class=\\"activity-caveat\\">Live and historical counts use the same USGS M" + esc(Number(activity.catalogMinMagnitude).toFixed(1)) + "+ catalog floor. The engine multiplier is current count divided by a floored baseline denominator: " + esc(activity.currentCount24h) + " / max(1, " + esc(Number(activity.baselineCount24h).toFixed(2)) + ") = " + esc(Number(activity.rateMultiple).toFixed(1)) + "x. This is monitoring context, not an eruption probability.</p>" +
+        references +
+      "</div></details>";
+    }
+
+    function activityStat(value, label) {
+      return "<div class=\\"activity-stat\\"><div class=\\"activity-value\\">" + esc(value) + "</div><div class=\\"activity-label\\">" + esc(label) + "</div></div>";
+    }
+
+    function shortDate(value) {
+      if (!value) return "n/a";
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return "n/a";
+      return date.toLocaleDateString([], { month: "short", day: "numeric" });
     }
 
     function sources(items) {
@@ -826,26 +978,84 @@ function sourceSummaries(
     });
 }
 
-function latestCascadeByRegion(states: CascadeState[]): Map<string, CascadeState> {
+function latestCascadeByRegion(
+  states: CascadeState[],
+  eventsById: Map<string, NormalizedEvent>
+): Map<string, CascadeState> {
   const byRegion = new Map<string, CascadeState>();
-  const targetStates = states
-    .filter((state) => state.reason !== "official earthquake outside configured target regions")
-    .sort((a, b) => b.stageStartedAt.getTime() - a.stageStartedAt.getTime());
-  for (const state of targetStates) {
-    if (!byRegion.has(state.region)) {
-      byRegion.set(state.region, state);
+  const regions = new Set(
+    states
+      .filter((state) => state.reason !== "official earthquake outside configured target regions")
+      .map((state) => state.region)
+  );
+  for (const region of regions) {
+    const selected = representativeState(
+      states.filter(
+        (state) =>
+          state.region === region &&
+          state.reason !== "official earthquake outside configured target regions"
+      ),
+      eventsById
+    );
+    if (selected) {
+      byRegion.set(region, selected);
     }
   }
   return byRegion;
 }
 
-function regionSummary(rule: RegionRule, state?: CascadeState, latestEvent?: NormalizedEvent): RegionSummary {
+function representativeState(
+  states: CascadeState[],
+  eventsById: Map<string, NormalizedEvent>
+): CascadeState | undefined {
+  const latestTime = states
+    .map((state) => state.stageStartedAt.getTime())
+    .sort((a, b) => b - a)[0];
+  if (latestTime === undefined) {
+    return undefined;
+  }
+
+  return states
+    .filter((state) => state.stageStartedAt.getTime() === latestTime)
+    .sort((a, b) => {
+      if (a.staleGatePassed !== b.staleGatePassed) {
+        return a.staleGatePassed ? -1 : 1;
+      }
+      const stageDifference = stageRank(b.stage) - stageRank(a.stage);
+      if (stageDifference !== 0) {
+        return stageDifference;
+      }
+      const eventTimeDifference =
+        (eventsById.get(b.latestEventId)?.eventTime.getTime() ?? 0) -
+        (eventsById.get(a.latestEventId)?.eventTime.getTime() ?? 0);
+      return eventTimeDifference || a.id.localeCompare(b.id);
+    })[0];
+}
+
+function effectiveStage(state?: CascadeState): CascadeStage {
+  if (!state) {
+    return "S0";
+  }
+  if (state.staleGatePassed) {
+    return state.stage;
+  }
+  return state.activeWindowId ? "S1" : "S0";
+}
+
+function regionSummary(
+  rule: RegionRule,
+  state?: CascadeState,
+  latestEvent?: NormalizedEvent,
+  activity?: RegionActivitySummary
+): RegionSummary {
+  const qualifiedStage = effectiveStage(state);
   return {
     region: rule.id,
     label: humanizeRegion(rule.id),
     stage: state?.stage ?? "S0",
+    effectiveStage: qualifiedStage,
     stageLabel: stageLabel(state?.stage ?? "S0"),
-    operatorSummary: regionOperatorSummary(state?.stage ?? "S0", state?.staleGatePassed ?? false),
+    operatorSummary: regionOperatorSummary(state),
     reason: state?.reason ?? "No recent cascade state recorded for this region.",
     confidence: state?.confidence ?? 0,
     staleGatePassed: state?.staleGatePassed ?? false,
@@ -854,7 +1064,8 @@ function regionSummary(rule: RegionRule, state?: CascadeState, latestEvent?: Nor
     latestEvent: latestEvent ? eventSummary(latestEvent) : undefined,
     activeWindowId: state?.activeWindowId,
     comparatorOnly: rule.id === "CARIBBEAN_VENEZUELA_COMPARATOR",
-    alertThreshold: alertThreshold(rule)
+    alertThreshold: alertThreshold(rule),
+    activity
   };
 }
 
@@ -927,7 +1138,8 @@ function latestCycleSummary(
   sourceRuns: SourceRun[],
   events: NormalizedEvent[],
   states: CascadeState[],
-  notifications: Array<{ sentAt: Date }>
+  notifications: Array<{ sentAt: Date }>,
+  eventsById: Map<string, NormalizedEvent>
 ): DashboardData["latestCycle"] {
   const scheduledRuns = sourceRuns.filter((run) =>
     SCHEDULED_SOURCES.includes(run.source as (typeof SCHEDULED_SOURCES)[number])
@@ -971,7 +1183,7 @@ function latestCycleSummary(
   const sourceFailures = cycleRuns
     .filter((run) => run.status === "error")
     .map((run) => sourceLabel(run.source));
-  const stageChanges = changedRegionsForCycle(config, states, cycleStartedAt, cycleEnd);
+  const stageChanges = changedRegionsForCycle(config, states, eventsById, cycleStartedAt, cycleEnd);
   const targetEventsIngested = cycleEvents.filter(
     (event) => event.region && event.region !== "CARIBBEAN_VENEZUELA_COMPARATOR"
   ).length;
@@ -999,44 +1211,52 @@ function latestCycleSummary(
 function changedRegionsForCycle(
   config: WatcherConfig,
   states: CascadeState[],
+  eventsById: Map<string, NormalizedEvent>,
   cycleStartedAt: Date,
   cycleEnd: number
 ): StageChangeSummary[] {
   return config.regions
     .filter((rule) => rule.id !== "CARIBBEAN_VENEZUELA_COMPARATOR")
     .flatMap((rule) => {
-      const regionStates = states
-        .filter((state) => state.region === rule.id)
-        .sort((a, b) => a.stageStartedAt.getTime() - b.stageStartedAt.getTime());
-      const current = regionStates
-        .filter(
-          (state) => state.stageStartedAt >= cycleStartedAt && state.stageStartedAt.getTime() <= cycleEnd + 60_000
-        )
-        .at(-1);
-      const previous = regionStates.filter((state) => state.stageStartedAt < cycleStartedAt).at(-1);
-      if (!current || !previous || current.stage === previous.stage) {
+      const regionStates = states.filter((state) => state.region === rule.id);
+      const current = representativeState(
+        regionStates.filter(
+          (state) =>
+            state.stageStartedAt >= cycleStartedAt &&
+            state.stageStartedAt.getTime() <= cycleEnd + 60_000
+        ),
+        eventsById
+      );
+      const previous = representativeState(
+        regionStates.filter((state) => state.stageStartedAt < cycleStartedAt),
+        eventsById
+      );
+      const currentStage = effectiveStage(current);
+      const previousStage = effectiveStage(previous);
+      if (!current || !previous || currentStage === previousStage) {
         return [];
       }
       return [
         {
           region: rule.id,
           label: humanizeRegion(rule.id),
-          fromStage: previous.stage,
-          toStage: current.stage
+          fromStage: previousStage,
+          toStage: currentStage
         }
       ];
     });
 }
 
-function regionOperatorSummary(stage: CascadeStage, staleGatePassed: boolean): string {
+function regionOperatorSummary(state?: CascadeState): string {
+  const stage = state?.stage ?? "S0";
   if (stage === "S0") {
     return "No qualifying official signal.";
   }
-  if (stage === "S1") {
+  if (stage === "S1" && state?.staleGatePassed) {
     return "Context watch only; no local signal crossed its threshold.";
   }
-  if (!staleGatePassed) {
-    return "Signal suppressed because freshness checks did not pass.";
+  if (!state?.staleGatePassed) {
+    return `Candidate ${stage} signal blocked because freshness checks did not pass.`;
   }
   const summaries: Record<CascadeStage, string> = {
     S0: "No qualifying official signal.",
@@ -1063,6 +1283,216 @@ function alertThreshold(rule: RegionRule): string {
     threshold.escalateIfHansNotNormal ? "HANS above NORMAL" : undefined
   ].filter((part): part is string => Boolean(part));
   return parts.join(" | ");
+}
+
+function regionActivitySummaries(
+  config: WatcherConfig,
+  events: NormalizedEvent[],
+  baselines: RegionBaseline[],
+  now: Date
+): Map<string, RegionActivitySummary> {
+  const result = new Map<string, RegionActivitySummary>();
+  const earthquakeEvents = dedupeEarthquakeEvents(
+    events,
+    config.baselineMinMagnitude
+  );
+
+  for (const rule of config.regions) {
+    if (rule.id === "CARIBBEAN_VENEZUELA_COMPARATOR") {
+      continue;
+    }
+    const baseline = baselines
+      .filter(
+        (item) =>
+          item.region === rule.id &&
+          item.metric === "earthquakes_count_24h"
+      )
+      .sort(
+        (a, b) =>
+          b.windowDays - a.windowDays ||
+          b.computedAt.getTime() - a.computedAt.getTime()
+      )[0];
+    if (!baseline) {
+      continue;
+    }
+
+    const historyDays = Math.max(1, baseline.windowDays);
+    const sparkWindowDays = Math.min(90, historyDays);
+    const historyStart = new Date(now.getTime() - historyDays * 86_400_000);
+    const regionEvents = earthquakeEvents
+      .filter(
+        (event) =>
+          event.region === rule.id &&
+          event.eventTime >= historyStart &&
+          event.eventTime <= now
+      )
+      .sort((a, b) => a.eventTime.getTime() - b.eventTime.getTime());
+    const sparkline = Array.from({ length: sparkWindowDays }, (_, index) => {
+      const endedAt = new Date(
+        now.getTime() - (sparkWindowDays - index - 1) * 86_400_000
+      );
+      const windowEvents = eventsInTrailingDay(regionEvents, endedAt);
+      return {
+        date: endedAt.toISOString(),
+        count: windowEvents.length,
+        maxMagnitude: maximumMagnitude(windowEvents)
+      };
+    });
+    const current: ActivityPoint = sparkline.at(-1) ?? {
+      date: now.toISOString(),
+      count: 0
+    };
+    const historicalSamples = sparkline.slice(0, -1);
+    const percentile = historicalSamples.length
+      ? Math.round(
+          (historicalSamples.filter((point) => point.count <= current.count)
+            .length /
+            historicalSamples.length) *
+            100
+        )
+      : 0;
+    const priorWindowEnds = regionEvents
+      .filter(
+        (event) =>
+          event.eventTime.getTime() <= now.getTime() - 86_400_000
+      )
+      .sort((a, b) => b.eventTime.getTime() - a.eventTime.getTime())
+      .map((event) => ({
+        endedAt: event.eventTime.toISOString(),
+        count: countEventsInTrailingDay(regionEvents, event.eventTime)
+      }));
+    const previousAtOrAbove =
+      current.count > 0
+        ? priorWindowEnds.find((point) => point.count >= current.count)
+        : undefined;
+    const recentPeak =
+      [...priorWindowEnds].sort(
+        (a, b) =>
+          b.count - a.count ||
+          new Date(b.endedAt).getTime() - new Date(a.endedAt).getTime()
+      )[0] ?? {
+        endedAt: new Date(now.getTime() - 86_400_000).toISOString(),
+        count: 0
+      };
+
+    result.set(rule.id, {
+      historyDays,
+      sparkWindowDays,
+      catalogMinMagnitude: config.baselineMinMagnitude,
+      currentCount24h: current.count,
+      currentMaxMagnitude: current.maxMagnitude,
+      baselineCount24h: baseline.value,
+      rateMultiple: current.count / Math.max(1, baseline.value),
+      percentile,
+      previousAtOrAbove,
+      recentPeak,
+      absoluteThreshold: rule.alertThresholds.swarmCount24h,
+      sparkline,
+      officialContext: officialContextForRegion(rule.id)
+    });
+  }
+
+  return result;
+}
+
+function dedupeEarthquakeEvents(
+  events: NormalizedEvent[],
+  minMagnitude: number
+): NormalizedEvent[] {
+  const byExternalId = new Map<string, NormalizedEvent>();
+  for (const event of events) {
+    if (
+      event.eventType !== "earthquake" ||
+      event.magnitude === undefined ||
+      event.magnitude < minMagnitude ||
+      !OFFICIAL_SOURCES.has(event.source as OfficialSource)
+    ) {
+      continue;
+    }
+    const existing = byExternalId.get(event.externalId);
+    if (!existing || preferActivityEvent(event, existing)) {
+      byExternalId.set(event.externalId, event);
+    }
+  }
+  return [...byExternalId.values()];
+}
+
+function preferActivityEvent(
+  candidate: NormalizedEvent,
+  existing: NormalizedEvent
+): boolean {
+  const candidateLive = candidate.source === "usgs_earthquake_geojson";
+  const existingLive = existing.source === "usgs_earthquake_geojson";
+  if (candidateLive !== existingLive) {
+    return candidateLive;
+  }
+  return candidate.sourceUpdatedAt > existing.sourceUpdatedAt;
+}
+
+function eventsInTrailingDay(
+  events: NormalizedEvent[],
+  endedAt: Date
+): NormalizedEvent[] {
+  const startedAt = endedAt.getTime() - 86_400_000;
+  const startIndex = firstEventAfter(events, startedAt);
+  const endIndex = firstEventAfter(events, endedAt.getTime());
+  return events.slice(startIndex, endIndex);
+}
+
+function countEventsInTrailingDay(
+  events: NormalizedEvent[],
+  endedAt: Date
+): number {
+  const startedAt = endedAt.getTime() - 86_400_000;
+  return (
+    firstEventAfter(events, endedAt.getTime()) -
+    firstEventAfter(events, startedAt)
+  );
+}
+
+function firstEventAfter(events: NormalizedEvent[], timestamp: number): number {
+  let low = 0;
+  let high = events.length;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if (events[middle].eventTime.getTime() <= timestamp) {
+      low = middle + 1;
+    } else {
+      high = middle;
+    }
+  }
+  return low;
+}
+
+function maximumMagnitude(events: NormalizedEvent[]): number | undefined {
+  const magnitudes = events
+    .map((event) => event.magnitude)
+    .filter((magnitude): magnitude is number => magnitude !== undefined);
+  return magnitudes.length ? Math.max(...magnitudes) : undefined;
+}
+
+function officialContextForRegion(region: string): OfficialContextReference[] {
+  if (region !== "CASCADE_VOLCANOES_ST_HELENS") {
+    return [];
+  }
+  return [
+    {
+      title: "Mount St. Helens seismicity remained within background levels",
+      source: "USGS Cascades Volcano Observatory",
+      publishedAt: "2024-06-21",
+      metric: "Peak 38 earthquakes/week; more than 95% were below M1; alert level remained NORMAL.",
+      officialUrl:
+        "https://www.usgs.gov/observatories/cvo/news/mount-st-helens-seismicity-elevated-within-range-background-levels-february"
+    },
+    {
+      title: "2023 earthquake uptick remained within background levels",
+      source: "USGS Cascades Volcano Observatory",
+      publishedAt: "2023-10-20",
+      metric: "Peak 40-50 earthquakes/week; no signs of an imminent eruption.",
+      officialUrl:
+        "https://www.usgs.gov/observatories/cvo/news/uptick-earthquake-activity-mount-st-helens-remains-within-background-levels"
+    }
+  ];
 }
 
 function eventSummary(event: NormalizedEvent): EventSummary {
@@ -1179,7 +1609,7 @@ function notificationChannel(config: WatcherConfig): DashboardData["system"]["no
 
 function maxRegionStage(regions: RegionSummary[]): CascadeStage {
   return regions
-    .map((region) => region.stage)
+    .map((region) => region.effectiveStage)
     .sort((a, b) => stageRank(b) - stageRank(a))[0] ?? "S0";
 }
 
