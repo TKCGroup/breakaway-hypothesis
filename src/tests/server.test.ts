@@ -46,7 +46,9 @@ describe("watcher HTTP server", () => {
       const response = await fetch(`${url}/dashboard`);
       expect(response.status).toBe(200);
       expect(response.headers.get("content-type")).toContain("text/html");
-      expect(await response.text()).toContain("Engine under the hood");
+      const html = await response.text();
+      expect(html).toContain("Engine under the hood");
+      expect(html).toContain("Most notable monitored geohazard");
     } finally {
       await close();
     }

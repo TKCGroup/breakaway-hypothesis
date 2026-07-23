@@ -7,6 +7,8 @@ export type OfficialSource =
   | "swpc_solar_wind"
   | "swpc_alerts"
   | "nasa_donki"
+  | "nasa_eonet"
+  | "nws_alerts"
   | "tsunami_ntwc"
   | "tsunami_ptwc";
 
@@ -15,6 +17,8 @@ export type EventType =
   | "volcano_notice"
   | "space_weather"
   | "tsunami"
+  | "natural_event"
+  | "weather_alert"
   | "source_context";
 
 export type CascadeStage = "S0" | "S1" | "S2" | "S3" | "S4" | "S5";

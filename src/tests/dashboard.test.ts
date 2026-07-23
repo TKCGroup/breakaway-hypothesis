@@ -269,4 +269,154 @@ describe("dashboard data", () => {
       operatorSummary: "Candidate S3 signal blocked because freshness checks did not pass."
     });
   });
+
+  it("ranks an active official warning above recent and forecast candidates", async () => {
+    const repo = new InMemoryWatcherRepository();
+    await repo.upsertEvent(
+      eventFixture({
+        id: "recent-earthquake",
+        externalId: "us-m7",
+        title: "M 7.0 - Test earthquake",
+        eventTime: new Date(NOW.getTime() - 2 * 86_400_000),
+        sourceUpdatedAt: new Date(NOW.getTime() - 2 * 86_400_000),
+        ingestTime: new Date(NOW.getTime() - 2 * 86_400_000),
+        region: undefined,
+        magnitude: 7
+      })
+    );
+    await repo.upsertEvent(
+      eventFixture({
+        id: "active-tornado",
+        source: "nws_alerts",
+        externalId: "nws-active-tornado",
+        eventType: "weather_alert",
+        title: "Tornado Warning: Test County",
+        eventTime: new Date(NOW.getTime() - 10 * 60_000),
+        sourceUpdatedAt: new Date(NOW.getTime() - 10 * 60_000),
+        ingestTime: NOW,
+        region: undefined,
+        magnitude: undefined,
+        depthKm: undefined,
+        severity: "Extreme/Observed/Immediate",
+        officialUrl: "https://api.weather.gov/alerts/active-tornado",
+        rawJson: {
+          properties: {
+            event: "Tornado Warning",
+            severity: "Extreme",
+            certainty: "Observed",
+            urgency: "Immediate",
+            expires: new Date(NOW.getTime() + 50 * 60_000).toISOString()
+          }
+        }
+      })
+    );
+    await repo.upsertEvent(
+      eventFixture({
+        id: "prior-tornado",
+        source: "nws_alerts",
+        externalId: "nws-prior-tornado",
+        eventType: "weather_alert",
+        title: "Tornado Warning: Prior County",
+        eventTime: new Date(NOW.getTime() - 5 * 86_400_000),
+        sourceUpdatedAt: new Date(NOW.getTime() - 5 * 86_400_000),
+        ingestTime: new Date(NOW.getTime() - 5 * 86_400_000),
+        region: undefined,
+        magnitude: undefined,
+        depthKm: undefined,
+        severity: "Extreme/Observed/Immediate",
+        officialUrl: "https://api.weather.gov/alerts/prior-tornado",
+        rawJson: {
+          properties: {
+            event: "Tornado Warning",
+            severity: "Extreme",
+            certainty: "Observed",
+            urgency: "Immediate",
+            expires: new Date(
+              NOW.getTime() - 5 * 86_400_000 + 60 * 60_000
+            ).toISOString()
+          }
+        }
+      })
+    );
+
+    const data = await buildDashboardData(repo, DEFAULT_CONFIG, NOW);
+
+    expect(data.notableEvent).toMatchObject({
+      period: "active",
+      periodLabel: "Active now",
+      category: "Tornado Warning",
+      metric: "Extreme · Observed · Immediate",
+      score: 100,
+      rarityPercentile: 50,
+      comparableCount: 2,
+      event: {
+        externalId: "nws-active-tornado",
+        source: "nws_alerts"
+      },
+      previousAtOrAbove: {
+        title: "Tornado Warning: Prior County"
+      }
+    });
+    expect(data.notableEvent?.timeline).toHaveLength(61);
+    expect(data.notableEvent?.forecastCoverage).toContain(
+      "Earthquakes are not forecast"
+    );
+  });
+
+  it("uses only explicit official future times as forecast candidates", async () => {
+    const repo = new InMemoryWatcherRepository();
+    const futureTime = new Date(NOW.getTime() + 24 * 60 * 60_000);
+    await repo.upsertEvent(
+      eventFixture({
+        id: "impossible-future-earthquake",
+        externalId: "future-m9",
+        title: "M 9.0 - impossible future fixture",
+        eventTime: futureTime,
+        sourceUpdatedAt: NOW,
+        ingestTime: NOW,
+        region: undefined,
+        magnitude: 9
+      })
+    );
+    await repo.upsertEvent(
+      eventFixture({
+        id: "forecast-weather",
+        source: "nws_alerts",
+        externalId: "nws-forecast",
+        eventType: "weather_alert",
+        title: "Hurricane Warning: Forecast Area",
+        eventTime: futureTime,
+        sourceUpdatedAt: NOW,
+        ingestTime: NOW,
+        region: undefined,
+        magnitude: undefined,
+        depthKm: undefined,
+        severity: "Extreme/Likely/Expected",
+        officialUrl: "https://api.weather.gov/alerts/forecast",
+        rawJson: {
+          properties: {
+            event: "Hurricane Warning",
+            severity: "Extreme",
+            certainty: "Likely",
+            urgency: "Expected",
+            onset: futureTime.toISOString(),
+            expires: new Date(
+              futureTime.getTime() + 12 * 60 * 60_000
+            ).toISOString()
+          }
+        }
+      })
+    );
+
+    const data = await buildDashboardData(repo, DEFAULT_CONFIG, NOW);
+
+    expect(data.notableEvent).toMatchObject({
+      period: "forecast",
+      periodLabel: "Explicit official forecast",
+      event: {
+        externalId: "nws-forecast",
+        source: "nws_alerts"
+      }
+    });
+  });
 });

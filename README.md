@@ -46,6 +46,8 @@ Deployment scaffolding lives in `deploy/` and targets the Altbot GCP project `al
 2. USGS HANS volcano API.
 3. NOAA/SWPC, NASA DONKI, and NOAA tsunami feeds.
 
+NASA EONET natural events and severe/extreme NOAA/NWS CAP alerts provide broader dashboard context. They are persisted as official-source records but intentionally excluded from cascade scoring and Slack notification output.
+
 ## Environment
 
 ```bash
@@ -59,6 +61,7 @@ MAX_EVENT_AGE_HOURS=12
 SPACE_WEATHER_WINDOW_HOURS=72
 BASELINE_DAYS_SHORT=30
 BASELINE_DAYS_LONG=90
+BASELINE_MIN_MAGNITUDE=0
 DRY_RUN=true
 PORT=8080
 SCHEDULER_SHARED_SECRET=

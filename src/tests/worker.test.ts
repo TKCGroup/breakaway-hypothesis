@@ -29,6 +29,50 @@ describe("worker", () => {
       if (url.includes("volcanoes.usgs.gov") || url.includes("api.nasa.gov")) {
         return jsonResponse([]);
       }
+      if (url.includes("eonet.gsfc.nasa.gov")) {
+        return jsonResponse({
+          events: [
+            {
+              id: "EONET_TEST",
+              title: "Test wildfire",
+              link: "https://eonet.gsfc.nasa.gov/api/v3/events/EONET_TEST",
+              closed: null,
+              categories: [{ id: "wildfires", title: "Wildfires" }],
+              geometry: [
+                {
+                  magnitudeValue: 500,
+                  magnitudeUnit: "acres",
+                  date: NOW.toISOString(),
+                  type: "Point",
+                  coordinates: [-121, 44]
+                }
+              ]
+            }
+          ]
+        });
+      }
+      if (url.includes("api.weather.gov")) {
+        return jsonResponse({
+          features: [
+            {
+              id: "https://api.weather.gov/alerts/test",
+              properties: {
+                id: "test-alert",
+                event: "Flash Flood Warning",
+                areaDesc: "Test County",
+                sent: NOW.toISOString(),
+                effective: NOW.toISOString(),
+                onset: NOW.toISOString(),
+                expires: new Date(NOW.getTime() + 60 * 60_000).toISOString(),
+                severity: "Severe",
+                certainty: "Observed",
+                urgency: "Immediate",
+                "@id": "https://api.weather.gov/alerts/test"
+              }
+            }
+          ]
+        });
+      }
       if (url.includes("services.swpc.noaa.gov")) {
         return jsonResponse([["time_tag", "Kp"]]);
       }
@@ -70,6 +114,11 @@ describe("worker", () => {
         )
       ).toBe(true);
       expect(await repo.listNotifications()).not.toHaveLength(0);
+      const contextEventIds = (await repo.listEvents())
+        .filter((event) => event.eventType === "natural_event" || event.eventType === "weather_alert")
+        .map((event) => event.id);
+      expect(contextEventIds).toHaveLength(2);
+      expect(states.every((state) => !contextEventIds.includes(state.latestEventId))).toBe(true);
     } finally {
       logMock.mockRestore();
       globalThis.fetch = originalFetch;

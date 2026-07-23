@@ -283,6 +283,8 @@ function sourceLabel(source: string): string {
     swpc_solar_wind: "NOAA/SWPC solar wind",
     swpc_alerts: "NOAA/SWPC alerts",
     nasa_donki: "NASA DONKI",
+    nasa_eonet: "NASA EONET",
+    nws_alerts: "NOAA/NWS alerts",
     tsunami_ntwc: "NOAA NTWC tsunami feed",
     tsunami_ptwc: "NOAA PTWC tsunami feed"
   };

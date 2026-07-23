@@ -6,6 +6,8 @@ import { evaluateCascade } from "./logic/cascade.js";
 import { DryRunNotifier, notificationDedupeKey } from "./logic/notifier.js";
 import { WatcherScheduler } from "./scheduler.js";
 import { fetchDonkiEvents } from "./sources/donki.js";
+import { fetchEonetEvents } from "./sources/eonet.js";
+import { fetchNwsAlerts } from "./sources/nwsAlerts.js";
 import { fetchSwpcKp } from "./sources/swpc.js";
 import { fetchTsunamiFeed } from "./sources/tsunami.js";
 import { fetchUsgsEarthquakeFeed } from "./sources/usgsEarthquake.js";
@@ -28,6 +30,8 @@ export async function runOnce(now = new Date(), repo: WatcherRepository = new In
     { source: "usgs_hans", run: () => fetchHansElevatedVolcanoes(now) },
     { source: "swpc_kp", run: () => fetchSwpcKp(now) },
     { source: "nasa_donki", run: () => fetchDonkiEvents(config.nasaApiKey, now) },
+    { source: "nasa_eonet", run: () => fetchEonetEvents(now) },
+    { source: "nws_alerts", run: () => fetchNwsAlerts(now) },
     { source: "tsunami_ntwc", run: () => fetchTsunamiFeed("ntwc", now) },
     { source: "tsunami_ptwc", run: () => fetchTsunamiFeed("ptwc", now) }
   ];
@@ -59,9 +63,10 @@ export async function runOnce(now = new Date(), repo: WatcherRepository = new In
   for (const event of batches.flatMap((batch) => (batch.status === "fulfilled" ? batch.value : []))) {
     events.push((await repo.upsertEvent(event)).event);
   }
+  const cascadeEvents = events.filter((event) => !isDashboardContextOnly(event));
 
   const currentWindows: WatchWindow[] = [];
-  for (const event of events) {
+  for (const event of cascadeEvents) {
     const state = evaluateCascade({ event, now, config });
     await repo.saveCascadeState(state);
     if (state.stage !== "S1") {
@@ -83,7 +88,7 @@ export async function runOnce(now = new Date(), repo: WatcherRepository = new In
   const baselines = await repo.listRegionBaselines();
   const tsunamiStatus = highestTsunamiStatus(events);
   const previousNotifications = await repo.listNotifications();
-  for (const event of events) {
+  for (const event of cascadeEvents) {
     const state = evaluateCascade({
       event,
       activeWindows: windows,
@@ -119,6 +124,10 @@ export async function runOnce(now = new Date(), repo: WatcherRepository = new In
   for (const failed of batches.filter((batch) => batch.status === "rejected")) {
     console.error((failed as PromiseRejectedResult).reason);
   }
+}
+
+function isDashboardContextOnly(event: NormalizedEvent): boolean {
+  return event.eventType === "natural_event" || event.eventType === "weather_alert";
 }
 
 async function activeWatchWindows(

@@ -59,6 +59,8 @@ export const OFFICIAL_SOURCES = new Set<OfficialSource>([
   "swpc_solar_wind",
   "swpc_alerts",
   "nasa_donki",
+  "nasa_eonet",
+  "nws_alerts",
   "tsunami_ntwc",
   "tsunami_ptwc"
 ]);
@@ -78,6 +80,8 @@ export const DEFAULT_CONFIG: WatcherConfig = {
       swpc_solar_wind: 1,
       swpc_alerts: 2,
       nasa_donki: 12,
+      nasa_eonet: 6,
+      nws_alerts: 1,
       tsunami_ntwc: 2,
       tsunami_ptwc: 2
     }

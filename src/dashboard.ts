@@ -15,6 +15,8 @@ const SCHEDULED_SOURCES = [
   "usgs_hans",
   "swpc_kp",
   "nasa_donki",
+  "nasa_eonet",
+  "nws_alerts",
   "tsunami_ntwc",
   "tsunami_ptwc"
 ] as const;
@@ -145,6 +147,41 @@ interface StageChangeSummary {
   toStage: CascadeStage;
 }
 
+type NotableEventPeriod = "active" | "recent" | "forecast";
+
+interface NotableTimelinePoint {
+  date: string;
+  eventCount: number;
+  maxScore: number;
+}
+
+interface NotableComparisonPoint {
+  title: string;
+  occurredAt: string;
+  score: number;
+  officialUrl: string;
+}
+
+interface NotableEventSummary {
+  period: NotableEventPeriod;
+  periodLabel: string;
+  category: string;
+  metric: string;
+  score: number;
+  rarityPercentile: number;
+  comparableCount: number;
+  occurredAt: string;
+  endsAt?: string;
+  event: EventSummary;
+  selectionReason: string;
+  scoreBreakdown: string;
+  comparisonBasis: string;
+  previousAtOrAbove?: NotableComparisonPoint;
+  candidateCount: number;
+  timeline: NotableTimelinePoint[];
+  forecastCoverage: string;
+}
+
 export interface DashboardData {
   ok: true;
   generatedAt: string;
@@ -166,6 +203,7 @@ export interface DashboardData {
     sourceHealth: "healthy" | "degraded";
     sourceHealthDetail: string;
   };
+  notableEvent?: NotableEventSummary;
   latestCycle: {
     startedAt?: string;
     completedAt?: string;
@@ -237,6 +275,7 @@ export async function buildDashboardData(
   const sources = sourceSummaries(sourceRuns, liveEvents, config, now);
   const latestCycle = latestCycleSummary(config, sourceRuns, liveEvents, cascadeStates, notifications, eventsById);
   const posture = postureSummary(regions, sources);
+  const notableEvent = mostNotableEvent(events, windows, now);
   const latestRunCompletedAt = latestCycle.completedAt ?? maxIso(sourceRuns.map((run) => run.completedAt));
   const latestIngestAt = maxIso(liveEvents.map((event) => event.ingestTime));
   const latestSourceUpdatedAt = maxIso(liveEvents.map((event) => event.sourceUpdatedAt));
@@ -270,6 +309,7 @@ export async function buildDashboardData(
         "Alerts are generated only from official source records after stale-gate evaluation; news, search, social, and snippets are excluded."
     },
     posture,
+    notableEvent,
     latestCycle,
     summary: {
       latestIngestAt,
@@ -546,6 +586,37 @@ export function dashboardHtml(): string {
     .fact:last-child { border-bottom: 0; }
     .fact-label { color: var(--muted); }
     .fact-value { text-align: right; font-weight: 750; }
+    .notable { border-left: 6px solid var(--stage4); }
+    .notable-inner { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(320px, .65fr); gap: 20px; padding: 18px; }
+    .notable-title-row { display: flex; align-items: start; justify-content: space-between; gap: 12px; }
+    .notable h2 { margin-top: 6px; font-size: 21px; }
+    .notable-event { display: inline-block; margin-top: 10px; font-size: 17px; font-weight: 800; line-height: 1.3; }
+    .period-badge { flex: 0 0 auto; padding: 5px 8px; border-radius: 6px; background: var(--soft-watch); color: var(--watch); font-size: 11px; font-weight: 800; }
+    .period-badge.forecast { background: var(--soft-blue); color: var(--blue); }
+    .period-badge.active { background: var(--soft-warn); color: var(--warn); }
+    .notable-copy { margin: 8px 0 0; color: var(--muted); font-size: 12px; line-height: 1.45; }
+    .notable-score { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-content: start; border-left: 1px solid var(--line); padding-left: 18px; }
+    .notable-stat { padding: 8px 10px; border-bottom: 1px solid var(--line); }
+    .notable-stat:nth-child(odd) { padding-left: 0; border-right: 1px solid var(--line); }
+    .notable-stat-value { font-size: 19px; font-weight: 800; line-height: 1.2; }
+    .notable-stat-label { margin-top: 4px; color: var(--muted); font-size: 10px; line-height: 1.35; }
+    .notable-context { display: grid; gap: 10px; padding: 0 18px 18px; }
+    .notable-spark {
+      height: 62px;
+      display: flex;
+      align-items: end;
+      gap: 2px;
+      padding-top: 5px;
+      border-bottom: 1px solid var(--line);
+      background: #fafbf9;
+    }
+    .notable-bar { flex: 1 1 3px; min-width: 1px; max-width: 16px; border-radius: 2px 2px 0 0; background: #9bbcaf; }
+    .notable-bar.future { background: #8db7d1; }
+    .notable-bar.selected { background: var(--stage4); }
+    .notable-timeline-labels { display: flex; justify-content: space-between; color: var(--muted); font-size: 9px; }
+    .notable-audit { display: flex; flex-wrap: wrap; gap: 6px 14px; color: var(--muted); font-size: 10px; line-height: 1.4; }
+    .notable-method { display: grid; gap: 5px; padding: 10px 12px; border: 1px solid var(--line); background: #fafbf9; font-size: 10px; line-height: 1.4; color: var(--muted); }
+    .notable-method strong { color: var(--ink); }
     .change-panel { display: grid; grid-template-columns: minmax(260px, .9fr) minmax(0, 1.5fr); }
     .change-copy { padding: 17px 18px; border-right: 1px solid var(--line); }
     .change-copy h2 { margin-top: 7px; font-size: 18px; }
@@ -580,6 +651,8 @@ export function dashboardHtml(): string {
       .grid-2, .grid-3 { grid-template-columns: 1fr; }
       .pipeline { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .verdict { grid-template-columns: 1fr; }
+      .notable-inner { grid-template-columns: 1fr; }
+      .notable-score { border-left: 0; border-top: 1px solid var(--line); padding: 10px 0 0; }
       .change-panel { grid-template-columns: 1fr; }
       .change-copy { border-right: 0; border-bottom: 1px solid var(--line); }
     }
@@ -598,6 +671,9 @@ export function dashboardHtml(): string {
       .activity-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .activity-stat:nth-child(2) { border-right: 0; }
       .activity-stat:nth-child(-n+2) { padding-bottom: 7px; border-bottom: 1px solid var(--line); }
+      .notable-inner { padding: 15px; }
+      .notable-context { padding: 0 15px 15px; }
+      .notable-title-row { display: grid; }
     }
   </style>
 </head>
@@ -643,6 +719,7 @@ export function dashboardHtml(): string {
       app.className = "";
       app.innerHTML = [
         verdict(data),
+        notableEvent(data.notableEvent),
         latestCycle(data.latestCycle),
         metrics(data),
         regions(data.regions),
@@ -676,6 +753,50 @@ export function dashboardHtml(): string {
 
     function fact(label, valueHtml) {
       return "<div class=\\"fact\\"><span class=\\"fact-label\\">" + esc(label) + "</span><span class=\\"fact-value\\">" + valueHtml + "</span></div>";
+    }
+
+    function notableEvent(item) {
+      if (!item) {
+        return "<section><div class=\\"section-head\\"><h2>Most notable monitored geohazard</h2><span class=\\"section-note\\">official sources only</span></div><div class=\\"empty\\">No qualifying official event in the current coverage window.</div></section>";
+      }
+      const selectedDay = item.occurredAt.slice(0, 10);
+      const bars = item.timeline.map((point, index) => {
+        const height = point.maxScore ? Math.max(7, point.maxScore) : 3;
+        const future = index > 30 ? " future" : "";
+        const selected = point.date.slice(0, 10) === selectedDay ? " selected" : "";
+        const title = shortDate(point.date) + ": " + point.eventCount + " candidate" + (point.eventCount === 1 ? "" : "s") + ", max score " + point.maxScore;
+        return "<span class=\\"notable-bar" + future + selected + "\\" style=\\"height:" + height + "%\\" title=\\"" + escAttr(title) + "\\"></span>";
+      }).join("");
+      const previous = item.previousAtOrAbove
+        ? "<a href=\\"" + escAttr(item.previousAtOrAbove.officialUrl) + "\\" target=\\"_blank\\" rel=\\"noreferrer\\">" + esc(shortDate(item.previousAtOrAbove.occurredAt) + " · " + item.previousAtOrAbove.title) + "</a>"
+        : "None in available comparison records";
+      const timing = item.period === "forecast"
+        ? "Expected " + fmtTime(item.occurredAt)
+        : item.period === "active"
+          ? "Active" + (item.endsAt ? " until " + fmtTime(item.endsAt) : " now")
+          : fmtTime(item.occurredAt);
+      const region = item.event.region ? item.event.region.replaceAll("_", " ") : "Global / source-defined area";
+      return "<section class=\\"notable\\">" +
+        "<div class=\\"notable-inner\\"><div>" +
+          "<div class=\\"notable-title-row\\"><div><div class=\\"eyebrow\\">Most notable monitored geohazard</div><h2>" + esc(item.category) + "</h2></div><span class=\\"period-badge " + escAttr(item.period) + "\\">" + esc(item.periodLabel) + "</span></div>" +
+          "<a class=\\"notable-event\\" href=\\"" + escAttr(item.event.officialUrl) + "\\" target=\\"_blank\\" rel=\\"noreferrer\\">" + esc(item.event.title) + "</a>" +
+          "<p class=\\"notable-copy\\">" + esc(item.selectionReason) + "</p>" +
+        "</div><div class=\\"notable-score\\">" +
+          notableStat(item.score + "/100", "Transparent notability score") +
+          notableStat(item.comparableCount === 1 ? "Only record" : item.rarityPercentile + "th", "Percentile within comparable records") +
+          notableStat(item.metric, "Official event metric") +
+          notableStat(timing, "Timing") +
+        "</div></div>" +
+        "<div class=\\"notable-context\\">" +
+          "<div><div class=\\"notable-spark\\" aria-label=\\"Daily highest official notability score from 30 days ago through 30 days ahead\\">" + bars + "</div><div class=\\"notable-timeline-labels\\"><span>-30 days</span><span>daily max score · Now</span><span>+30 days</span></div></div>" +
+          "<div class=\\"notable-audit\\"><span>Official source: " + esc(item.event.sourceLabel) + "</span><span>Event/forecast time: " + esc(fmtTime(item.occurredAt)) + "</span><span>Source updated: " + esc(fmtTime(item.event.sourceUpdatedAt)) + "</span><span>Scope: " + esc(region) + "</span></div>" +
+          "<div class=\\"notable-method\\"><div><strong>Why it ranked first:</strong> " + esc(item.scoreBreakdown) + "</div><div><strong>Rarity basis:</strong> " + esc(item.comparisonBasis) + "</div><div><strong>Previous equal or higher:</strong> " + previous + "</div><div><strong>Forecast boundary:</strong> " + esc(item.forecastCoverage) + "</div><div>Notability is not verified impact, casualties, or an emergency declaration.</div></div>" +
+        "</div>" +
+      "</section>";
+    }
+
+    function notableStat(value, label) {
+      return "<div class=\\"notable-stat\\"><div class=\\"notable-stat-value\\">" + esc(value) + "</div><div class=\\"notable-stat-label\\">" + esc(label) + "</div></div>";
     }
 
     function latestCycle(cycle) {
@@ -1285,6 +1406,520 @@ function alertThreshold(rule: RegionRule): string {
   return parts.join(" | ");
 }
 
+interface NotableCandidate {
+  event: NormalizedEvent;
+  period: NotableEventPeriod;
+  occurredAt: Date;
+  endsAt?: Date;
+  category: string;
+  metric: string;
+  baseScore: number;
+  score: number;
+  scoreBreakdown: string;
+  comparisonKey: string;
+  comparisonBasis: string;
+}
+
+function mostNotableEvent(
+  events: NormalizedEvent[],
+  windows: WatchWindow[],
+  now: Date
+): NotableEventSummary | undefined {
+  const earliest = new Date(now.getTime() - 30 * 86_400_000);
+  const latest = new Date(now.getTime() + 30 * 86_400_000);
+  const activeWindowIds = new Set(
+    windows
+      .filter((window) => window.active && window.endsAt > now)
+      .map((window) => window.triggerEventId)
+  );
+  const candidates = dedupeNotableEvents(events)
+    .flatMap((event) => {
+      const candidate = notableCandidate(event, activeWindowIds, now);
+      if (
+        !candidate ||
+        (candidate.occurredAt > now && candidate.period !== "forecast") ||
+        candidate.occurredAt < earliest ||
+        candidate.occurredAt > latest
+      ) {
+        return [];
+      }
+      return [candidate];
+    })
+    .sort(
+      (a, b) =>
+        b.score - a.score ||
+        periodRank(b.period) - periodRank(a.period) ||
+        b.occurredAt.getTime() - a.occurredAt.getTime()
+    );
+  const selected = candidates[0];
+  if (!selected) {
+    return undefined;
+  }
+
+  const comparable = candidates.filter(
+    (candidate) => candidate.comparisonKey === selected.comparisonKey
+  );
+  const lowerScoreCount = comparable.filter(
+    (candidate) => candidate.baseScore < selected.baseScore
+  ).length;
+  const equalScoreCount = comparable.filter(
+    (candidate) => candidate.baseScore === selected.baseScore
+  ).length;
+  const rarityPercentile = Math.round(
+    ((lowerScoreCount + equalScoreCount / 2) / comparable.length) * 100
+  );
+  const previousAtOrAbove = comparable
+    .filter(
+      (candidate) =>
+        candidate.event.id !== selected.event.id &&
+        candidate.occurredAt.getTime() <=
+          selected.occurredAt.getTime() - 86_400_000 &&
+        candidate.baseScore >= selected.baseScore
+    )
+    .sort((a, b) => b.occurredAt.getTime() - a.occurredAt.getTime())[0];
+
+  return {
+    period: selected.period,
+    periodLabel: notablePeriodLabel(selected.period),
+    category: selected.category,
+    metric: selected.metric,
+    score: selected.score,
+    rarityPercentile,
+    comparableCount: comparable.length,
+    occurredAt: selected.occurredAt.toISOString(),
+    endsAt: selected.endsAt?.toISOString(),
+    event: eventSummary(selected.event),
+    selectionReason: `${selected.period === "forecast" ? "Highest-ranked explicit official forecast" : "Highest-ranked official event"} among ${candidates.length} monitored candidates from the last 30 days through the next 30 days.`,
+    scoreBreakdown: selected.scoreBreakdown,
+    comparisonBasis: `${selected.comparisonBasis} (${comparable.length} comparable record${comparable.length === 1 ? "" : "s"})`,
+    previousAtOrAbove: previousAtOrAbove
+      ? {
+          title: previousAtOrAbove.event.title,
+          occurredAt: previousAtOrAbove.occurredAt.toISOString(),
+          score: previousAtOrAbove.score,
+          officialUrl: previousAtOrAbove.event.officialUrl
+        }
+      : undefined,
+    candidateCount: candidates.length,
+    timeline: notableTimeline(candidates, now),
+    forecastCoverage:
+      "Future candidates require an explicit official onset or arrival time from NWS or NASA DONKI. Earthquakes are not forecast by this card."
+  };
+}
+
+function dedupeNotableEvents(events: NormalizedEvent[]): NormalizedEvent[] {
+  const byKey = new Map<string, NormalizedEvent>();
+  for (const event of events) {
+    if (!OFFICIAL_SOURCES.has(event.source as OfficialSource)) {
+      continue;
+    }
+    const key =
+      event.eventType === "earthquake"
+        ? `earthquake:${event.externalId}`
+        : `${event.source}:${event.externalId}`;
+    const existing = byKey.get(key);
+    if (
+      !existing ||
+      (event.source === "usgs_earthquake_geojson" &&
+        existing.source === "usgs_fdsn_backfill") ||
+      event.sourceUpdatedAt > existing.sourceUpdatedAt
+    ) {
+      byKey.set(key, event);
+    }
+  }
+  return [...byKey.values()];
+}
+
+function notableCandidate(
+  event: NormalizedEvent,
+  activeWindowIds: Set<string>,
+  now: Date
+): NotableCandidate | undefined {
+  const forecastAt = explicitForecastTime(event, now);
+  const occurredAt = forecastAt ?? event.eventTime;
+  const endsAt = eventEndsAt(event);
+  const period: NotableEventPeriod = forecastAt
+    ? "forecast"
+    : isEventActive(event, activeWindowIds, now, endsAt)
+      ? "active"
+      : "recent";
+  const scored = scoreNotableEvent(event);
+  if (!scored) {
+    return undefined;
+  }
+  const periodBonus = period === "active" ? 3 : period === "forecast" ? 2 : 0;
+  return {
+    event,
+    period,
+    occurredAt,
+    endsAt,
+    category: scored.category,
+    metric: scored.metric,
+    baseScore: scored.score,
+    score: Math.min(100, scored.score + periodBonus),
+    scoreBreakdown: `${scored.breakdown}${periodBonus ? `; ${period} +${periodBonus}` : ""}.`,
+    comparisonKey: scored.comparisonKey,
+    comparisonBasis: scored.comparisonBasis
+  };
+}
+
+function scoreNotableEvent(event: NormalizedEvent):
+  | {
+      category: string;
+      metric: string;
+      score: number;
+      breakdown: string;
+      comparisonKey: string;
+      comparisonBasis: string;
+    }
+  | undefined {
+  if (event.eventType === "earthquake" && event.magnitude !== undefined) {
+    const magnitude = event.magnitude;
+    const score =
+      magnitude >= 8
+        ? 100
+        : magnitude >= 7
+          ? Math.round(92 + (magnitude - 7) * 8)
+          : magnitude >= 6
+            ? Math.round(82 + (magnitude - 6) * 10)
+            : magnitude >= 5
+              ? Math.round(68 + (magnitude - 5) * 14)
+              : magnitude >= 4
+                ? Math.round(52 + (magnitude - 4) * 16)
+                : Math.max(10, Math.round(10 + magnitude * 14));
+    const region = event.region ? humanizeRegion(event.region) : "Global feed";
+    return {
+      category: "Earthquake",
+      metric: `M${magnitude.toFixed(1)}${event.depthKm !== undefined ? ` · ${event.depthKm.toFixed(1)} km deep` : ""}`,
+      score: clampScore(score),
+      breakdown: `Earthquake magnitude M${magnitude.toFixed(1)} maps to ${clampScore(score)}/100`,
+      comparisonKey: `earthquake:${event.region ?? "global"}`,
+      comparisonBasis: `${region} earthquake magnitudes`
+    };
+  }
+
+  if (event.eventType === "weather_alert") {
+    const raw = rawObject(event);
+    const properties = rawObjectField(raw, "properties");
+    const severity = stringValue(properties.severity) ?? "Unknown";
+    const certainty = stringValue(properties.certainty) ?? "Unknown";
+    const urgency = stringValue(properties.urgency) ?? "Unknown";
+    const eventName = stringValue(properties.event) ?? "Weather alert";
+    const severityScore: Record<string, number> = {
+      Extreme: 94,
+      Severe: 80,
+      Moderate: 58,
+      Minor: 35,
+      Unknown: 25
+    };
+    const eventBonus = /tornado|hurricane|typhoon/i.test(eventName)
+      ? 8
+      : /tropical storm/i.test(eventName)
+        ? 5
+        : /flash flood/i.test(eventName)
+          ? 4
+          : /severe thunderstorm/i.test(eventName)
+            ? 2
+            : 0;
+    const certaintyBonus =
+      certainty === "Observed" ? 4 : certainty === "Likely" ? 2 : 0;
+    const urgencyBonus =
+      urgency === "Immediate" ? 4 : urgency === "Expected" ? 2 : 0;
+    const score = clampScore(
+      (severityScore[severity] ?? severityScore.Unknown) +
+        eventBonus +
+        certaintyBonus +
+        urgencyBonus
+    );
+    return {
+      category: eventName,
+      metric: `${severity} · ${certainty} · ${urgency}`,
+      score,
+      breakdown: `NWS ${severity} ${severityScore[severity] ?? severityScore.Unknown} + event ${eventBonus} + certainty ${certaintyBonus} + urgency ${urgencyBonus} = ${score}/100`,
+      comparisonKey: `nws:${eventName}`,
+      comparisonBasis: `NWS ${eventName} alerts`
+    };
+  }
+
+  if (event.eventType === "natural_event") {
+    const raw = rawObject(event);
+    const category =
+      arrayObjectField(raw, "categories")
+        .map((item) => stringValue(item.title))
+        .find(Boolean) ?? "Natural event";
+    const latestGeometry = arrayObjectField(raw, "geometry").sort(
+      (a, b) =>
+        dateValueForRanking(b.date) - dateValueForRanking(a.date)
+    )[0];
+    const magnitude = numberValue(latestGeometry?.magnitudeValue);
+    const magnitudeUnit = stringValue(latestGeometry?.magnitudeUnit);
+    const categoryScore = eonetCategoryScore(category);
+    const magnitudeBonus =
+      magnitude !== undefined
+        ? Math.min(18, Math.max(0, Math.round(Math.log10(magnitude + 1) * 4)))
+        : 0;
+    const score = clampScore(categoryScore + magnitudeBonus);
+    return {
+      category,
+      metric:
+        magnitude !== undefined
+          ? `${formatCompactNumber(magnitude)}${magnitudeUnit ? ` ${magnitudeUnit}` : ""}`
+          : "Magnitude not supplied",
+      score,
+      breakdown: `NASA EONET ${category} base ${categoryScore} + reported-magnitude context ${magnitudeBonus} = ${score}/100`,
+      comparisonKey: `eonet:${category}`,
+      comparisonBasis: `NASA EONET ${category} events`
+    };
+  }
+
+  if (event.eventType === "tsunami") {
+    const severity = (event.severity ?? "statement").toLowerCase();
+    const score = severity.includes("warning")
+      ? 98
+      : severity.includes("advisory")
+        ? 86
+        : severity.includes("watch")
+          ? 72
+          : 35;
+    return {
+      category: "Tsunami product",
+      metric: severity,
+      score,
+      breakdown: `NOAA tsunami status ${severity} maps to ${score}/100`,
+      comparisonKey: "tsunami",
+      comparisonBasis: "NOAA tsunami products"
+    };
+  }
+
+  if (event.eventType === "volcano_notice") {
+    const severity = (event.severity ?? "UNKNOWN").toUpperCase();
+    const score = /RED|WARNING/.test(severity)
+      ? 100
+      : /ORANGE|WATCH/.test(severity)
+        ? 90
+        : /YELLOW|ADVISORY/.test(severity)
+          ? 74
+          : 30;
+    return {
+      category: "Volcano status",
+      metric: severity,
+      score,
+      breakdown: `USGS HANS status ${severity} maps to ${score}/100`,
+      comparisonKey: `volcano:${event.region ?? event.externalId}`,
+      comparisonBasis: "USGS HANS notices for this volcano"
+    };
+  }
+
+  if (event.eventType === "space_weather") {
+    const kp = numberValue(rawObject(event).kp);
+    const flareScore = flareNotability(event.severity);
+    const score =
+      kp !== undefined
+        ? clampScore(Math.round(10 + kp * 10))
+        : flareScore ?? (/CME|GST|SEP|HSS|IPS/.test(event.severity ?? "") ? 48 : 25);
+    return {
+      category: "Space weather",
+      metric:
+        kp !== undefined
+          ? `Kp ${kp}`
+          : event.severity ?? "Official space-weather event",
+      score,
+      breakdown: `${kp !== undefined ? `NOAA Kp ${kp}` : `Official ${event.severity ?? "space-weather"} status`} maps to ${score}/100`,
+      comparisonKey: `space-weather:${event.source}`,
+      comparisonBasis: `${sourceLabel(event.source)} records`
+    };
+  }
+
+  return undefined;
+}
+
+function explicitForecastTime(
+  event: NormalizedEvent,
+  now: Date
+): Date | undefined {
+  if (event.eventType === "weather_alert" && event.eventTime > now) {
+    return event.eventTime;
+  }
+  if (event.source !== "nasa_donki") {
+    return undefined;
+  }
+  const raw = rawObject(event);
+  const arrivals = arrayObjectField(raw, "cmeAnalyses")
+    .flatMap((analysis) => arrayObjectField(analysis, "enlilList"))
+    .filter((enlil) => enlil.isEarthGB === true)
+    .flatMap((enlil) => {
+      const date = parseRankingDate(enlil.estimatedShockArrivalTime);
+      return date && date > now ? [date] : [];
+    })
+    .sort((a, b) => a.getTime() - b.getTime());
+  return arrivals[0];
+}
+
+function eventEndsAt(event: NormalizedEvent): Date | undefined {
+  if (event.eventType === "weather_alert") {
+    const properties = rawObjectField(rawObject(event), "properties");
+    return (
+      parseRankingDate(properties.ends) ??
+      parseRankingDate(properties.expires)
+    );
+  }
+  if (event.eventType === "natural_event") {
+    return parseRankingDate(rawObject(event).closed);
+  }
+  return undefined;
+}
+
+function isEventActive(
+  event: NormalizedEvent,
+  activeWindowIds: Set<string>,
+  now: Date,
+  endsAt?: Date
+): boolean {
+  if (event.eventType === "weather_alert") {
+    return event.eventTime <= now && Boolean(endsAt && endsAt > now);
+  }
+  if (event.eventType === "natural_event") {
+    return rawObject(event).closed === null;
+  }
+  if (event.eventType === "space_weather") {
+    return activeWindowIds.has(event.id);
+  }
+  if (event.eventType === "tsunami") {
+    return (
+      /warning|advisory|watch/i.test(event.severity ?? "") &&
+      event.eventTime >= hoursAgo(now, 6)
+    );
+  }
+  return false;
+}
+
+function notableTimeline(
+  candidates: NotableCandidate[],
+  now: Date
+): NotableTimelinePoint[] {
+  const start = new Date(
+    Date.UTC(
+      now.getUTCFullYear(),
+      now.getUTCMonth(),
+      now.getUTCDate() - 30
+    )
+  );
+  const byDay = new Map<string, NotableCandidate[]>();
+  for (const candidate of candidates) {
+    const key = candidate.occurredAt.toISOString().slice(0, 10);
+    byDay.set(key, [...(byDay.get(key) ?? []), candidate]);
+  }
+  return Array.from({ length: 61 }, (_, index) => {
+    const date = new Date(start.getTime() + index * 86_400_000);
+    const dayCandidates = byDay.get(date.toISOString().slice(0, 10)) ?? [];
+    return {
+      date: date.toISOString(),
+      eventCount: dayCandidates.length,
+      maxScore: dayCandidates.length
+        ? Math.max(...dayCandidates.map((candidate) => candidate.score))
+        : 0
+    };
+  });
+}
+
+function rawObject(event: NormalizedEvent): Record<string, unknown> {
+  return event.rawJson && typeof event.rawJson === "object"
+    ? (event.rawJson as Record<string, unknown>)
+    : {};
+}
+
+function rawObjectField(
+  obj: Record<string, unknown>,
+  field: string
+): Record<string, unknown> {
+  const value = obj[field];
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function arrayObjectField(
+  obj: Record<string, unknown>,
+  field: string
+): Record<string, unknown>[] {
+  const value = obj[field];
+  return Array.isArray(value)
+    ? value.filter(
+        (item): item is Record<string, unknown> =>
+          Boolean(item) && typeof item === "object" && !Array.isArray(item)
+      )
+    : [];
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === "string" && value.length ? value : undefined;
+}
+
+function numberValue(value: unknown): number | undefined {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : undefined;
+}
+
+function parseRankingDate(value: unknown): Date | undefined {
+  if (typeof value !== "string" && typeof value !== "number") {
+    return undefined;
+  }
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? undefined : date;
+}
+
+function dateValueForRanking(value: unknown): number {
+  return parseRankingDate(value)?.getTime() ?? 0;
+}
+
+function eonetCategoryScore(category: string): number {
+  const lower = category.toLowerCase();
+  if (lower.includes("severe storm")) return 76;
+  if (lower.includes("volcano")) return 74;
+  if (lower.includes("flood")) return 70;
+  if (lower.includes("landslide")) return 68;
+  if (lower.includes("wildfire")) return 60;
+  if (lower.includes("drought")) return 58;
+  if (lower.includes("dust")) return 52;
+  return 45;
+}
+
+function flareNotability(severity?: string): number | undefined {
+  const match = severity?.toUpperCase().match(/^([CMX])([0-9]+(?:\.[0-9]+)?)/);
+  if (!match) {
+    return undefined;
+  }
+  const value = Number(match[2]);
+  return match[1] === "X"
+    ? clampScore(Math.round(86 + value * 4))
+    : match[1] === "M"
+      ? clampScore(Math.round(62 + value * 2))
+      : clampScore(Math.round(38 + value));
+}
+
+function notablePeriodLabel(period: NotableEventPeriod): string {
+  return period === "active"
+    ? "Active now"
+    : period === "forecast"
+      ? "Explicit official forecast"
+      : "Occurred in the last 30 days";
+}
+
+function periodRank(period: NotableEventPeriod): number {
+  return period === "active" ? 2 : period === "forecast" ? 1 : 0;
+}
+
+function clampScore(value: number): number {
+  return Math.max(0, Math.min(100, Math.round(value)));
+}
+
+function formatCompactNumber(value: number): string {
+  return new Intl.NumberFormat("en-US", {
+    notation: value >= 10_000 ? "compact" : "standard",
+    maximumFractionDigits: 1
+  }).format(value);
+}
+
 function regionActivitySummaries(
   config: WatcherConfig,
   events: NormalizedEvent[],
@@ -1672,6 +2307,8 @@ function sourceLabel(source: string): string {
     swpc_solar_wind: "NOAA/SWPC solar wind",
     swpc_alerts: "NOAA/SWPC alerts",
     nasa_donki: "NASA DONKI",
+    nasa_eonet: "NASA EONET",
+    nws_alerts: "NOAA/NWS alerts",
     tsunami_ntwc: "NOAA NTWC tsunami",
     tsunami_ptwc: "NOAA PTWC tsunami"
   };

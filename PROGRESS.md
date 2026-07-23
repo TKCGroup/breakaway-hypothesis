@@ -93,3 +93,12 @@
 - [x] Suppress repeated S3 regional-rate notifications for distinct microquake events inside the configured duplicate window.
 - [x] Align live and historical counts to the same configured `M0.0+` catalog floor.
 - [x] Pass typecheck, 59 tests, build, and responsive visual verification before requesting live deployment.
+
+## Most Notable Official Event — 2026-07-23
+
+- [x] Ingest NASA EONET open/recent natural events and severe/extreme NWS CAP alerts as dashboard-only context.
+- [x] Keep the new context sources outside cascade scoring and notification output.
+- [x] Rank active, last-30-day, and explicitly forecast events with a disclosed notability method.
+- [x] Add a top dashboard card with official source, timing, rarity, prior comparison, and a 60-day spark timeline.
+- [x] State forecast coverage honestly; never imply earthquake prediction.
+- [x] Pass typecheck, 65 tests, build, and responsive visual verification before requesting live deployment.
