@@ -118,4 +118,13 @@
 - [x] Add a public `/api/earth` contract without changing scoring or notification isolation.
 - [x] Add fail-loud data handling, HTTPS-only outbound links, CSP, anti-framing, and browser capability restrictions.
 - [x] Pass full typecheck, 72 tests, build, diff, inline-script syntax, and responsive browser verification.
-- [ ] Push the verified commit and request the Cloud Run plus `earth.tkcgroup.co` production rollout from Altbot.
+- [x] Push the verified commit and request the Cloud Run plus `earth.tkcgroup.co` production rollout from Altbot.
+
+## Earth Watch Production Receipt — 2026-07-25
+
+- Deployed source commit: `f66c93b Add public Earth Watch map`.
+- Live Cloud Run revision: `breakaway-hypothesis-watcher-00015-z8f`, 100% traffic.
+- Public URL: `https://earth.tkcgroup.co/`.
+- Cloudflare Worker: `tkcgroup-earth-watch`; route, proxied DNS, and hostname IUAM exception confirmed.
+- `DRY_RUN=false`, Slack bot channel `C0AS8NB0LQY`, Scheduler cadence, runtime service account, Cloud SQL, and secret bindings were preserved.
+- Origin and edge checks passed for page and JSON routes. The live API is official-only, contains complete provenance and stale-gate fields, and exposes no news/search/social/snippet records.
