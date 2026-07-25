@@ -2,7 +2,12 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { loadConfig, type WatcherConfig } from "./config.js";
 import { createRepository, type RepositoryHandle } from "./db/createRepository.js";
 import { runMigrations } from "./db/migrations.js";
-import { buildDashboardData, dashboardHtml } from "./dashboard.js";
+import {
+  buildDashboardData,
+  dashboardHtml,
+  loadDashboardSnapshot
+} from "./dashboard.js";
+import { buildEarthWatchData, earthWatchHtml } from "./earth.js";
 import { runOnce } from "./worker.js";
 
 const config = loadConfig();
@@ -83,6 +88,28 @@ async function handleDashboardApi(req: IncomingMessage, res: ServerResponse, con
   }
 }
 
+async function handleEarthApi(req: IncomingMessage, res: ServerResponse, context: ServerContext): Promise<void> {
+  if (req.method !== "GET") {
+    writeJson(res, 405, { ok: false, error: "method_not_allowed" });
+    return;
+  }
+
+  const handle = context.createRepositoryHandle();
+  try {
+    const snapshot = await loadDashboardSnapshot(handle.repo);
+    writeJson(
+      res,
+      200,
+      buildEarthWatchData(snapshot, context.config),
+      "public, max-age=0, s-maxage=60, stale-while-revalidate=30"
+    );
+  } catch (error) {
+    writeJson(res, 500, { ok: false, error: error instanceof Error ? error.message : String(error) });
+  } finally {
+    await handle.close();
+  }
+}
+
 export function createWatcherServer(options: WatcherServerOptions = {}) {
   const context: ServerContext = {
     config: options.config ?? config,
@@ -116,6 +143,25 @@ async function route(req: IncomingMessage, res: ServerResponse, context: ServerC
     return;
   }
 
+  if (pathname === "/earth") {
+    if (req.method !== "GET") {
+      writeJson(res, 405, { ok: false, error: "method_not_allowed" });
+      return;
+    }
+    writeHtml(
+      res,
+      200,
+      earthWatchHtml(),
+      "public, max-age=0, s-maxage=300, stale-while-revalidate=60"
+    );
+    return;
+  }
+
+  if (pathname === "/api/earth") {
+    await handleEarthApi(req, res, context);
+    return;
+  }
+
   if (pathname === "/run") {
     await handleRun(req, res, context);
     return;
@@ -124,13 +170,44 @@ async function route(req: IncomingMessage, res: ServerResponse, context: ServerC
   writeJson(res, 404, { ok: false, error: "not_found" });
 }
 
-function writeJson(res: ServerResponse, statusCode: number, body: unknown): void {
-  res.writeHead(statusCode, { "content-type": "application/json", "cache-control": "no-store" });
+function writeJson(
+  res: ServerResponse,
+  statusCode: number,
+  body: unknown,
+  cacheControl = "no-store"
+): void {
+  res.writeHead(statusCode, {
+    "content-type": "application/json",
+    "cache-control": cacheControl
+  });
   res.end(JSON.stringify(body));
 }
 
-function writeHtml(res: ServerResponse, statusCode: number, body: string): void {
-  res.writeHead(statusCode, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+function writeHtml(
+  res: ServerResponse,
+  statusCode: number,
+  body: string,
+  cacheControl = "no-store"
+): void {
+  res.writeHead(statusCode, {
+    "content-type": "text/html; charset=utf-8",
+    "cache-control": cacheControl,
+    "content-security-policy": [
+      "default-src 'self'",
+      "base-uri 'self'",
+      "connect-src 'self'",
+      "font-src https://fonts.gstatic.com",
+      "form-action 'none'",
+      "frame-ancestors 'none'",
+      "img-src 'self' data: https://unpkg.com https://*.nationalmap.gov https://*.basemaps.cartocdn.com",
+      "script-src 'self' 'unsafe-inline' https://unpkg.com",
+      "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://unpkg.com"
+    ].join("; "),
+    "permissions-policy": "camera=(), microphone=(), geolocation=(self)",
+    "referrer-policy": "strict-origin-when-cross-origin",
+    "x-content-type-options": "nosniff",
+    "x-frame-options": "DENY"
+  });
   res.end(body);
 }
 

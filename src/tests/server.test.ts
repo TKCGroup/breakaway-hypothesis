@@ -46,6 +46,7 @@ describe("watcher HTTP server", () => {
       const response = await fetch(`${url}/dashboard`);
       expect(response.status).toBe(200);
       expect(response.headers.get("content-type")).toContain("text/html");
+      expect(response.headers.get("cache-control")).toBe("no-store");
       const html = await response.text();
       expect(html).toContain("Engine under the hood");
       expect(html).toContain("Most notable monitored geohazard");
@@ -74,6 +75,59 @@ describe("watcher HTTP server", () => {
         system: {
           service: "breakaway-hypothesis-watcher",
           officialOnly: true
+        }
+      });
+    } finally {
+      await close();
+    }
+  });
+
+  it("serves the public Earth Watch shell", async () => {
+    const { url, close } = await listen();
+
+    try {
+      const response = await fetch(`${url}/earth`);
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-type")).toContain("text/html");
+      expect(response.headers.get("cache-control")).toContain("s-maxage=300");
+      expect(response.headers.get("content-security-policy")).toContain(
+        "frame-ancestors 'none'"
+      );
+      expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+      const html = await response.text();
+      expect(html).toContain("US Geohazard Watch");
+      expect(html).toContain("leaflet");
+      expect(html).toContain("Not a prediction");
+      expect(html).toContain('data-window="forecast"');
+    } finally {
+      await close();
+    }
+  });
+
+  it("serves official-only Earth Watch JSON", async () => {
+    const repo = new InMemoryWatcherRepository();
+    const { url, close } = await listen(
+      createWatcherServer({
+        createRepositoryHandle: () => ({
+          repo,
+          close: async () => {}
+        })
+      })
+    );
+
+    try {
+      const response = await fetch(`${url}/api/earth`);
+      expect(response.status).toBe(200);
+      expect(response.headers.get("cache-control")).toContain("s-maxage=60");
+      expect(await response.json()).toMatchObject({
+        ok: true,
+        system: {
+          service: "breakaway-hypothesis-watcher",
+          officialOnly: true
+        },
+        map: {
+          events: [],
+          nonSpatialSignals: []
         }
       });
     } finally {

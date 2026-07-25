@@ -101,6 +101,8 @@ function looksLikeOfficialUrl(url: string): boolean {
       "www.tsunami.gov",
       "weather.gov",
       "www.weather.gov",
+      "api.weather.gov",
+      "eonet.gsfc.nasa.gov",
       "earthquakescanada.nrcan.gc.ca"
     ].some((domain) => host === domain || host.endsWith(`.${domain}`));
   } catch {

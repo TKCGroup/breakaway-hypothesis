@@ -34,6 +34,12 @@ pnpm start:loop # built local loop mode
 The production entrypoint is `src/server.ts`:
 
 - `GET /healthz` returns basic service status.
+- `GET /dashboard` serves the live operator and engine view.
+- `GET /api/dashboard` returns its official-source JSON snapshot.
+- `GET /earth` serves the public, mobile-first Earth Watch map.
+- `GET /api/earth` returns mapped official events, non-spatial context, target
+  regions, event timestamps, source timestamps, ingest timestamps, cascade
+  stages, and stale-gate results.
 - `POST /run` executes one official-feed poll.
 - Concurrent `/run` calls are rejected with `409`.
 - `/run` requires `SCHEDULER_SHARED_SECRET` and the `X-BREAKAWAY-CRON-KEY` header.
@@ -47,6 +53,13 @@ Deployment scaffolding lives in `deploy/` and targets the Altbot GCP project `al
 3. NOAA/SWPC, NASA DONKI, and NOAA tsunami feeds.
 
 NASA EONET natural events and severe/extreme NOAA/NWS CAP alerts provide broader dashboard context. They are persisted as official-source records but intentionally excluded from cascade scoring and Slack notification output.
+
+The Earth Watch heat layer visualizes the relative load of current official
+signals. It is not a disaster-probability model, earthquake prediction, or an
+emergency-warning service. If Earth Watch cannot load its official data, the
+page fails visibly and does not present an empty map as an all-clear.
+The public HTML and JSON routes advertise five-minute and one-minute shared-edge
+cache lifetimes respectively; the operator dashboard remains `no-store`.
 
 ## Environment
 

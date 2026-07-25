@@ -102,3 +102,20 @@
 - [x] Add a top dashboard card with official source, timing, rarity, prior comparison, and a 60-day spark timeline.
 - [x] State forecast coverage honestly; never imply earthquake prediction.
 - [x] Pass typecheck, 65 tests, build, and responsive visual verification before requesting live deployment.
+
+## Earth Subdomain Coordination — 2026-07-25
+
+- [x] Trace the current `fire.tkcgroup.co` hosting, design-source, and DNS ownership path.
+- [x] Ask Altbot for the lowest-risk `earth.tkcgroup.co` implementation and deployment path.
+- [x] Confirm whether `travel.tkcgroup.co` is healthy and which agent owns it.
+- [x] Convert agent replies into an implementation plan without changing production DNS prematurely.
+
+## Public Earth Watch — 2026-07-25
+
+- [x] Reuse and harden the Fire Watch visual system for a dedicated mobile-first `/earth` surface.
+- [x] Add official event geometry, aggregate signal heat, target-region overlays, time and hazard filters, and non-spatial space-weather context.
+- [x] Include official source, event time, source update time, ingest time, region, cascade stage, and stale-gate result in map inspection.
+- [x] Add a public `/api/earth` contract without changing scoring or notification isolation.
+- [x] Add fail-loud data handling, HTTPS-only outbound links, CSP, anti-framing, and browser capability restrictions.
+- [x] Pass full typecheck, 72 tests, build, diff, inline-script syntax, and responsive browser verification.
+- [ ] Push the verified commit and request the Cloud Run plus `earth.tkcgroup.co` production rollout from Altbot.

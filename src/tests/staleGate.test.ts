@@ -84,4 +84,38 @@ describe("stale gate", () => {
 
     expect(result.passed).toBe(true);
   });
+
+  it("accepts official NOAA/NWS API links", () => {
+    const result = evaluateStaleGate(
+      eventFixture({
+        source: "nws_alerts",
+        eventType: "weather_alert",
+        title: "Severe Thunderstorm Warning",
+        eventTime: new Date("2026-07-08T11:30:00.000Z"),
+        sourceUpdatedAt: new Date("2026-07-08T11:45:00.000Z"),
+        officialUrl: "https://api.weather.gov/alerts/urn:oid:test"
+      }),
+      { now: NOW }
+    );
+
+    expect(result.passed).toBe(true);
+    expect(result.snippetOnly).toBe(false);
+  });
+
+  it("accepts official NASA EONET links", () => {
+    const result = evaluateStaleGate(
+      eventFixture({
+        source: "nasa_eonet",
+        eventType: "natural_event",
+        title: "Official NASA EONET event",
+        eventTime: new Date("2026-07-08T11:30:00.000Z"),
+        sourceUpdatedAt: new Date("2026-07-08T11:45:00.000Z"),
+        officialUrl: "https://eonet.gsfc.nasa.gov/api/v3/events/EONET_TEST"
+      }),
+      { now: NOW }
+    );
+
+    expect(result.passed).toBe(true);
+    expect(result.snippetOnly).toBe(false);
+  });
 });

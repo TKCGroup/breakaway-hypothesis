@@ -3,6 +3,7 @@ import type {
   CascadeStage,
   CascadeState,
   NormalizedEvent,
+  NotificationRecord,
   OfficialSource,
   RegionBaseline,
   SourceRun,
@@ -243,20 +244,63 @@ export interface DashboardData {
   baselines: BaselineSummary[];
 }
 
+export interface DashboardSnapshot {
+  events: NormalizedEvent[];
+  sourceRuns: SourceRun[];
+  cascadeStates: CascadeState[];
+  notifications: NotificationRecord[];
+  windows: WatchWindow[];
+  baselines: RegionBaseline[];
+}
+
+export async function loadDashboardSnapshot(
+  repo: WatcherRepository
+): Promise<DashboardSnapshot> {
+  const [events, sourceRuns, cascadeStates, notifications, windows, baselines] =
+    await Promise.all([
+      repo.listEvents(),
+      repo.listSourceRuns(),
+      repo.listCascadeStates(),
+      repo.listNotifications(),
+      repo.listWatchWindows(),
+      repo.listRegionBaselines()
+    ]);
+
+  return {
+    events,
+    sourceRuns,
+    cascadeStates,
+    notifications,
+    windows,
+    baselines
+  };
+}
+
 export async function buildDashboardData(
   repo: WatcherRepository,
   config: WatcherConfig = DEFAULT_CONFIG,
   now = new Date()
 ): Promise<DashboardData> {
-  const [events, sourceRuns, cascadeStates, notifications, windows, baselines] = await Promise.all([
-    repo.listEvents(),
-    repo.listSourceRuns(),
-    repo.listCascadeStates(),
-    repo.listNotifications(),
-    repo.listWatchWindows(),
-    repo.listRegionBaselines()
-  ]);
+  return buildDashboardDataFromSnapshot(
+    await loadDashboardSnapshot(repo),
+    config,
+    now
+  );
+}
 
+export function buildDashboardDataFromSnapshot(
+  snapshot: DashboardSnapshot,
+  config: WatcherConfig = DEFAULT_CONFIG,
+  now = new Date()
+): DashboardData {
+  const {
+    events,
+    sourceRuns,
+    cascadeStates,
+    notifications,
+    windows,
+    baselines
+  } = snapshot;
   const liveEvents = events
     .filter((event) => event.source !== "usgs_fdsn_backfill")
     .sort((a, b) => b.ingestTime.getTime() - a.ingestTime.getTime());
