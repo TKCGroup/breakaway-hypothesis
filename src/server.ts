@@ -1,4 +1,6 @@
+import { readFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { fileURLToPath } from "node:url";
 import { loadConfig, type WatcherConfig } from "./config.js";
 import { createRepository, type RepositoryHandle } from "./db/createRepository.js";
 import { runMigrations } from "./db/migrations.js";
@@ -8,10 +10,26 @@ import {
   loadDashboardSnapshot
 } from "./dashboard.js";
 import { buildEarthWatchData, earthWatchHtml } from "./earth.js";
+import { barkleyVisualizationHtml } from "./visualizations.js";
 import { runOnce } from "./worker.js";
 
 const config = loadConfig();
 const port = Number(process.env.PORT ?? 8080);
+const threeAssetPaths = new Map([
+  [
+    "/assets/three-0.180.0/three.module.js",
+    fileURLToPath(
+      new URL("../node_modules/three/build/three.module.min.js", import.meta.url)
+    )
+  ],
+  [
+    "/assets/three-0.180.0/three.core.min.js",
+    fileURLToPath(
+      new URL("../node_modules/three/build/three.core.min.js", import.meta.url)
+    )
+  ]
+]);
+const threeAssetSources = new Map<string, Promise<string>>();
 let running = false;
 
 interface ServerContext {
@@ -157,6 +175,46 @@ async function route(req: IncomingMessage, res: ServerResponse, context: ServerC
     return;
   }
 
+  if (pathname === "/visualizations" || pathname === "/earth/visualizations") {
+    if (req.method !== "GET") {
+      writeJson(res, 405, { ok: false, error: "method_not_allowed" });
+      return;
+    }
+    writeHtml(
+      res,
+      200,
+      barkleyVisualizationHtml(),
+      "public, max-age=0, s-maxage=300, stale-while-revalidate=60"
+    );
+    return;
+  }
+
+  const threeAssetPath = threeAssetPaths.get(pathname);
+  if (threeAssetPath) {
+    if (req.method !== "GET") {
+      writeJson(res, 405, { ok: false, error: "method_not_allowed" });
+      return;
+    }
+    try {
+      const source =
+        threeAssetSources.get(pathname) ?? readFile(threeAssetPath, "utf8");
+      threeAssetSources.set(pathname, source);
+      writeJavaScript(
+        res,
+        200,
+        await source,
+        "public, max-age=31536000, immutable"
+      );
+    } catch (error) {
+      threeAssetSources.delete(pathname);
+      writeJson(res, 500, {
+        ok: false,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+    return;
+  }
+
   if (pathname === "/api/earth") {
     await handleEarthApi(req, res, context);
     return;
@@ -207,6 +265,20 @@ function writeHtml(
     "referrer-policy": "strict-origin-when-cross-origin",
     "x-content-type-options": "nosniff",
     "x-frame-options": "DENY"
+  });
+  res.end(body);
+}
+
+function writeJavaScript(
+  res: ServerResponse,
+  statusCode: number,
+  body: string,
+  cacheControl: string
+): void {
+  res.writeHead(statusCode, {
+    "content-type": "text/javascript; charset=utf-8",
+    "cache-control": cacheControl,
+    "x-content-type-options": "nosniff"
   });
   res.end(body);
 }

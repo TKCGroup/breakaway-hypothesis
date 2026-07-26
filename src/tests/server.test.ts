@@ -99,6 +99,75 @@ describe("watcher HTTP server", () => {
       expect(html).toContain("leaflet");
       expect(html).toContain("Not a prediction");
       expect(html).toContain('data-window="forecast"');
+      expect(html).toContain('href="/visualizations"');
+      expect(html).toContain('aria-current="page">Live conditions');
+    } finally {
+      await close();
+    }
+  });
+
+  it("serves the full interactive visualization and its Earth-prefixed alias", async () => {
+    const { url, close } = await listen();
+
+    try {
+      for (const pathname of ["/visualizations", "/earth/visualizations"]) {
+        const response = await fetch(`${url}${pathname}`);
+        expect(response.status).toBe(200);
+        expect(response.headers.get("content-type")).toContain("text/html");
+        expect(response.headers.get("cache-control")).toContain("s-maxage=300");
+        expect(response.headers.get("content-security-policy")).toContain(
+          "script-src 'self'"
+        );
+        const html = await response.text();
+        expect(html).toContain("Frozen Head Quadrangle");
+        expect(html).toContain(
+          'import * as THREE from "/assets/three-0.180.0/three.module.js"'
+        );
+        expect(html).toContain("Interpretive reconstruction");
+        expect(html).toContain('aria-current="page">Visualizations');
+      }
+    } finally {
+      await close();
+    }
+  });
+
+  it("serves the pinned local Three.js browser module with immutable caching", async () => {
+    const { url, close } = await listen();
+
+    try {
+      for (const asset of [
+        ["/assets/three-0.180.0/three.module.js", "WebGLRenderer"],
+        ["/assets/three-0.180.0/three.core.min.js", "Vector3"]
+      ]) {
+        const response = await fetch(`${url}${asset[0]}`);
+        expect(response.status).toBe(200);
+        expect(response.headers.get("content-type")).toContain("text/javascript");
+        expect(response.headers.get("cache-control")).toBe(
+          "public, max-age=31536000, immutable"
+        );
+        expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+        expect(await response.text()).toContain(asset[1]);
+      }
+    } finally {
+      await close();
+    }
+  });
+
+  it("rejects non-GET visualization and static asset requests", async () => {
+    const { url, close } = await listen();
+
+    try {
+      for (const pathname of [
+        "/visualizations",
+        "/assets/three-0.180.0/three.module.js"
+      ]) {
+        const response = await fetch(`${url}${pathname}`, { method: "POST" });
+        expect(response.status).toBe(405);
+        expect(await response.json()).toMatchObject({
+          ok: false,
+          error: "method_not_allowed"
+        });
+      }
     } finally {
       await close();
     }

@@ -37,6 +37,9 @@ The production entrypoint is `src/server.ts`:
 - `GET /dashboard` serves the live operator and engine view.
 - `GET /api/dashboard` returns its official-source JSON snapshot.
 - `GET /earth` serves the public, mobile-first Earth Watch map.
+- `GET /visualizations` serves the interactive visualization gallery.
+- `GET /earth/visualizations` is the origin-safe visualization alias.
+- `GET /assets/three-0.180.0/*` serves the pinned local Three.js browser runtime.
 - `GET /api/earth` returns mapped official events, non-spatial context, target
   regions, event timestamps, source timestamps, ingest timestamps, cascade
   stages, and stale-gate results.
@@ -60,6 +63,11 @@ emergency-warning service. If Earth Watch cannot load its official data, the
 page fails visibly and does not present an empty map as an all-clear.
 The public HTML and JSON routes advertise five-minute and one-minute shared-edge
 cache lifetimes respectively; the operator dashboard remains `no-store`.
+
+Visualizations are interpretive, interactive context surfaces. Reconstructed
+courses, terrain, and landmarks are labeled as approximate and remain fully
+isolated from official-source ingestion, cascade scoring, stale-gate decisions,
+and notification output.
 
 ## Environment
 

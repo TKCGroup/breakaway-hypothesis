@@ -514,6 +514,18 @@ export function earthWatchHtml(): string {
     .freshness { text-align:right; font-size:12.5px; color:var(--muted); min-width:190px; }
     .dot { display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--clear); margin-right:6px; }
     .dot.stale { background:var(--critical); }
+    .earth-tabs {
+      display:flex; width:max-content; margin-top:10px; border:1px solid var(--hair);
+      border-radius:4px; overflow:hidden; background:var(--panel);
+    }
+    .earth-tabs a {
+      min-height:36px; display:flex; align-items:center; padding:0 13px; border-right:1px solid var(--hair);
+      color:var(--muted); font-family:"Barlow Condensed",sans-serif; font-size:12px; font-weight:600;
+      letter-spacing:.07em; text-decoration:none; text-transform:uppercase;
+    }
+    .earth-tabs a:last-child { border-right:0; }
+    .earth-tabs a[aria-current="page"] { background:var(--ink); color:var(--paper); }
+    .earth-tabs a:not([aria-current="page"]):hover { background:#F4F7F3; color:var(--ink); }
     .controls {
       display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap;
       margin-top:15px;
@@ -634,6 +646,8 @@ export function earthWatchHtml(): string {
       .wrap { padding:15px 12px 42px; }
       .mast { align-items:flex-start; }
       .freshness { text-align:left; }
+      .earth-tabs { width:100%; }
+      .earth-tabs a { flex:1; justify-content:center; }
       .controls { align-items:stretch; }
       .segmented { width:100%; }
       .segmented button { flex:1; padding:0 7px; }
@@ -663,6 +677,11 @@ export function earthWatchHtml(): string {
         <div class="mono" id="nextCheck" style="margin-top:4px;font-size:11px">15-minute official ingest cadence</div>
       </div>
     </header>
+
+    <nav class="earth-tabs" aria-label="Earth Watch views">
+      <a href="/" aria-current="page">Live conditions</a>
+      <a href="/visualizations">Visualizations</a>
+    </nav>
 
     <div class="controls">
       <div class="segmented" aria-label="Time window">

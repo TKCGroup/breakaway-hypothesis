@@ -128,3 +128,13 @@
 - Cloudflare Worker: `tkcgroup-earth-watch`; route, proxied DNS, and hostname IUAM exception confirmed.
 - `DRY_RUN=false`, Slack bot channel `C0AS8NB0LQY`, Scheduler cadence, runtime service account, Cloud SQL, and secret bindings were preserved.
 - Origin and edge checks passed for page and JSON routes. The live API is official-only, contains complete provenance and stale-gate fields, and exposes no news/search/social/snippet records.
+
+## Public Visualizations — 2026-07-25
+
+- [x] Add shared Live Conditions and Visualizations tabs to Earth Watch.
+- [x] Port the attached Barkley Marathons 3D terrain visualization at full interaction fidelity.
+- [x] Keep the reconstructed course clearly separated from official monitoring and alert inputs.
+- [x] Serve a pinned Three.js runtime from the existing service.
+- [x] Add route, security-header, and static visualization tests.
+- [x] Pass typecheck, tests, build, diff, embedded-script syntax, and responsive WebGL verification.
+- [ ] Push the verified commit and request the production rollout from Altbot.
