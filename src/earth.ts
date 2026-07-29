@@ -29,6 +29,14 @@ interface EarthGeometry {
   coordinates: unknown;
 }
 
+export interface EarthMapContext {
+  eligible: boolean;
+  result: "fresh" | "magnitude_extended" | "blocked";
+  windowHours: number;
+  eventAgeHours: number;
+  sourceAgeHours: number;
+}
+
 export interface EarthMapEvent {
   id: string;
   source: string;
@@ -52,6 +60,16 @@ export interface EarthMapEvent {
   staleGatePassed: boolean;
   staleGateResult: "passed" | "blocked";
   staleGateReasons: string[];
+  mapContext: EarthMapContext;
+}
+
+export interface EarthMapFocus {
+  mode: "signal_cluster" | "us_fallback";
+  center: [number, number];
+  zoom: number;
+  score: number;
+  label: string;
+  eventIds: string[];
 }
 
 export interface EarthMapRegion {
@@ -77,6 +95,7 @@ export interface EarthWatchData {
   latestCycle: DashboardData["latestCycle"];
   summary: DashboardData["summary"] & {
     currentFreshSignals: number;
+    activeMapSignals: number;
     mappedSignals: number;
     nonSpatialSignals: number;
   };
@@ -87,6 +106,7 @@ export interface EarthWatchData {
     events: EarthMapEvent[];
     nonSpatialSignals: EarthMapEvent[];
     regions: EarthMapRegion[];
+    focus: EarthMapFocus;
   };
 }
 
@@ -124,9 +144,9 @@ export function buildEarthWatchData(
     )
     .sort(
       (a, b) =>
-        statusRank(b.status) - statusRank(a.status) ||
-        Number(b.staleGatePassed) - Number(a.staleGatePassed) ||
+        Number(b.mapContext.eligible) - Number(a.mapContext.eligible) ||
         b.score - a.score ||
+        statusRank(b.status) - statusRank(a.status) ||
         Date.parse(b.eventTime) - Date.parse(a.eventTime)
     );
 
@@ -139,6 +159,7 @@ export function buildEarthWatchData(
   const currentFreshSignals = candidates.filter(
     (event) => event.status === "current" && event.staleGatePassed
   ).length;
+  const activeMapSignals = candidates.filter(isActiveMapEvent).length;
 
   return {
     ok: true,
@@ -150,18 +171,20 @@ export function buildEarthWatchData(
     summary: {
       ...dashboard.summary,
       currentFreshSignals,
+      activeMapSignals,
       mappedSignals: spatialEvents.length,
       nonSpatialSignals: nonSpatialSignals.length
     },
     sources: dashboard.sources,
     map: {
       coverage:
-        "United States default view with global official events available by panning or zooming.",
+        "The initial viewport follows the strongest eligible global official-signal cluster, with a United States fallback when no active signal qualifies.",
       method:
-        "Heat indicates fresh official signal load, not disaster probability. The strongest signal leads; overlap adds visual intensity without converting unlike hazards into a prediction.",
+        "Heat indicates eligible official signal load, not disaster probability. Earthquake map context persists by magnitude (under M4: 2h; M4-M5: 24h; M6: 72h; M7+: 7d) without changing the hard notification stale gate.",
       events: spatialEvents,
       nonSpatialSignals,
-      regions: earthMapRegions(config.regions, dashboard.regions)
+      regions: earthMapRegions(config.regions, dashboard.regions),
+      focus: earthMapFocus(spatialEvents)
     }
   };
 }
@@ -193,6 +216,7 @@ function earthMapEvent(
   now: Date
 ): EarthMapEvent {
   const staleGate = evaluateStaleGate(event, { config, now });
+  const mapContext = earthMapContext(event, staleGate, config, now);
   const family = hazardFamily(event);
   const status = eventStatus(event, staleGate.passed, now);
   return {
@@ -217,8 +241,79 @@ function earthMapEvent(
     cascadeStage,
     staleGatePassed: staleGate.passed,
     staleGateResult: staleGate.passed ? "passed" : "blocked",
-    staleGateReasons: staleGate.reasons
+    staleGateReasons: staleGate.reasons,
+    mapContext
   };
+}
+
+export function earthquakeMapContextWindowHours(
+  magnitude: number | undefined
+): number {
+  const value = magnitude ?? 0;
+  if (value >= 7) return 7 * 24;
+  if (value >= 6) return 72;
+  if (value >= 4) return 24;
+  return 2;
+}
+
+function earthMapContext(
+  event: NormalizedEvent,
+  staleGate: ReturnType<typeof evaluateStaleGate>,
+  config: WatcherConfig,
+  now: Date
+): EarthMapContext {
+  const eventAgeHours = hoursSince(event.eventTime, now);
+  const sourceAgeHours = hoursSince(event.sourceUpdatedAt, now);
+  const windowHours =
+    event.eventType === "earthquake"
+      ? earthquakeMapContextWindowHours(event.magnitude)
+      : config.freshness.maxEventAgeHours;
+  const withinWindow =
+    eventAgeHours >= -1 / 60 &&
+    sourceAgeHours >= -1 / 60 &&
+    eventAgeHours <= windowHours &&
+    sourceAgeHours <= windowHours;
+
+  if (
+    staleGate.passed &&
+    (event.eventType !== "earthquake" || withinWindow)
+  ) {
+    return {
+      eligible: true,
+      result: "fresh",
+      windowHours,
+      eventAgeHours,
+      sourceAgeHours
+    };
+  }
+
+  const temporalReasonsOnly = staleGate.reasons.every(
+    (reason) =>
+      reason.startsWith("event_time_outside_max_age:") ||
+      reason.startsWith("source_updated_at_stale:")
+  );
+  const magnitudeExtended =
+    event.eventType === "earthquake" &&
+    staleGate.sourceOfficial &&
+    !staleGate.snippetOnly &&
+    staleGate.titleDateConsistent &&
+    temporalReasonsOnly &&
+    withinWindow;
+
+  return {
+    eligible: magnitudeExtended,
+    result: magnitudeExtended ? "magnitude_extended" : "blocked",
+    windowHours,
+    eventAgeHours,
+    sourceAgeHours
+  };
+}
+
+function isActiveMapEvent(event: EarthMapEvent): boolean {
+  return (
+    event.mapContext.eligible &&
+    (event.family === "earthquake" || event.status === "current")
+  );
 }
 
 function eventStatus(
@@ -460,6 +555,167 @@ function numberValue(value: unknown): number | undefined {
   return Number.isFinite(number) ? number : undefined;
 }
 
+function hoursSince(then: Date, now: Date): number {
+  return (now.getTime() - then.getTime()) / 3_600_000;
+}
+
+function earthMapFocus(events: EarthMapEvent[]): EarthMapFocus {
+  const candidates = events
+    .filter(isActiveMapEvent)
+    .map((event) => ({
+      event,
+      point: representativePoint(event.geometry)
+    }))
+    .filter(
+      (
+        candidate
+      ): candidate is {
+        event: EarthMapEvent;
+        point: [number, number];
+      } => Boolean(candidate.point)
+    );
+
+  if (candidates.length === 0) {
+    return {
+      mode: "us_fallback",
+      center: [39.5, -98.35],
+      zoom: 4,
+      score: 0,
+      label: "United States fallback",
+      eventIds: []
+    };
+  }
+
+  const ranked = candidates
+    .map((anchor) => {
+      const members = candidates
+        .filter(
+          (candidate) =>
+            (candidate.event.id === anchor.event.id ||
+              candidate.event.score >= 35) &&
+            distanceKm(anchor.point, candidate.point) <= 650
+        )
+        .sort(
+          (a, b) =>
+            b.event.score - a.event.score ||
+            Date.parse(b.event.eventTime) - Date.parse(a.event.eventTime)
+        );
+      const clusterScore =
+        anchor.event.score + Math.min(7, Math.max(0, members.length - 1) * 1.5);
+      return { anchor, members, clusterScore };
+    })
+    .sort(
+      (a, b) =>
+        b.clusterScore - a.clusterScore ||
+        b.anchor.event.score - a.anchor.event.score ||
+        b.members.length - a.members.length ||
+        Date.parse(b.anchor.event.eventTime) -
+          Date.parse(a.anchor.event.eventTime)
+    );
+  const selected = ranked[0]!;
+  const maxDistanceKm = selected.members.reduce(
+    (largest, member) =>
+      Math.max(largest, distanceKm(selected.anchor.point, member.point)),
+    0
+  );
+  const zoom =
+    maxDistanceKm <= 80
+      ? 6
+      : maxDistanceKm <= 250
+        ? 5
+        : maxDistanceKm <= 650
+          ? 4
+          : 3;
+
+  return {
+    mode: "signal_cluster",
+    center: selected.anchor.point,
+    zoom,
+    score: Math.min(100, Math.round(selected.clusterScore)),
+    label:
+      selected.members.length > 1
+        ? `${shortFocusTitle(selected.anchor.event.title)} and ${selected.members.length - 1} nearby official signals`
+        : shortFocusTitle(selected.anchor.event.title),
+    eventIds: selected.members.slice(0, 24).map((member) => member.event.id)
+  };
+}
+
+function shortFocusTitle(title: string): string {
+  const maxLength = 96;
+  return title.length <= maxLength
+    ? title
+    : `${title.slice(0, maxLength - 3).trimEnd()}...`;
+}
+
+function representativePoint(
+  geometry: EarthGeometry | undefined
+): [number, number] | undefined {
+  if (!geometry) return undefined;
+  if (
+    geometry.type === "Point" &&
+    Array.isArray(geometry.coordinates) &&
+    geometry.coordinates.length >= 2
+  ) {
+    const lon = Number(geometry.coordinates[0]);
+    const lat = Number(geometry.coordinates[1]);
+    return validMapPoint(lat, lon) ? [lat, lon] : undefined;
+  }
+
+  const points: Array<[number, number]> = [];
+  collectCoordinatePairs(geometry.coordinates, points);
+  if (points.length === 0) return undefined;
+  const lat = points.reduce((sum, point) => sum + point[0], 0) / points.length;
+  const lon = points.reduce((sum, point) => sum + point[1], 0) / points.length;
+  return validMapPoint(lat, lon) ? [lat, lon] : undefined;
+}
+
+function collectCoordinatePairs(
+  value: unknown,
+  points: Array<[number, number]>
+): void {
+  if (!Array.isArray(value)) return;
+  if (
+    value.length >= 2 &&
+    typeof value[0] === "number" &&
+    typeof value[1] === "number"
+  ) {
+    const lon = value[0];
+    const lat = value[1];
+    if (validMapPoint(lat, lon)) points.push([lat, lon]);
+    return;
+  }
+  for (const item of value) collectCoordinatePairs(item, points);
+}
+
+function validMapPoint(lat: number, lon: number): boolean {
+  return (
+    Number.isFinite(lat) &&
+    Number.isFinite(lon) &&
+    lat >= -90 &&
+    lat <= 90 &&
+    lon >= -180 &&
+    lon <= 180
+  );
+}
+
+function distanceKm(
+  [latA, lonA]: [number, number],
+  [latB, lonB]: [number, number]
+): number {
+  const toRadians = Math.PI / 180;
+  const latARadians = latA * toRadians;
+  const latBRadians = latB * toRadians;
+  const latDelta = (latB - latA) * toRadians;
+  const lonDelta = (lonB - lonA) * toRadians;
+  const sinLat = Math.sin(latDelta / 2);
+  const sinLon = Math.sin(lonDelta / 2);
+  const haversine =
+    sinLat * sinLat +
+    Math.cos(latARadians) * Math.cos(latBRadians) * sinLon * sinLon;
+  const bounded = Math.max(0, Math.min(1, haversine));
+  return 6371 * 2 * Math.atan2(Math.sqrt(bounded), Math.sqrt(1 - bounded));
+}
+
 export function earthWatchHtml(): string {
   return `<!doctype html>
 <html lang="en">
@@ -471,7 +727,7 @@ export function earthWatchHtml(): string {
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="default">
   <meta name="apple-mobile-web-app-title" content="Earth Watch">
-  <title>Earth Watch - official US geohazard conditions</title>
+  <title>Earth Watch - official geohazard conditions</title>
   <meta name="description" content="Official-source earthquake, volcano, tsunami, severe-weather, natural-event, and space-weather situational awareness.">
   <meta property="og:title" content="Earth Watch - official geohazard conditions">
   <meta property="og:description" content="A live official-source view of current geological and natural hazard signals.">
@@ -668,7 +924,7 @@ export function earthWatchHtml(): string {
   <div class="wrap">
     <header class="mast">
       <div>
-        <div class="eyebrow">US Geohazard Watch</div>
+        <div class="eyebrow">Official Geohazard Watch</div>
         <h1>Earth Watch</h1>
         <div class="sub">Official-source geology, natural-hazard, and space-weather situational awareness.</div>
       </div>
@@ -701,13 +957,13 @@ export function earthWatchHtml(): string {
           <option value="tsunami">Tsunami</option>
           <option value="space_weather">Space weather</option>
         </select>
-        <button type="button" class="pbtn" id="resetUs">Reset US</button>
+        <button type="button" class="pbtn" id="resetFocus">Top activity</button>
         <button type="button" class="pbtn" id="locate">Use my location</button>
       </div>
     </div>
 
     <section class="intro">
-      <p>Use the map to inspect fresh official events, target-region stages, and broader natural-hazard context. The heat layer represents <strong>official signal load</strong>, not the probability of a disaster.</p>
+      <p>Use the map to inspect eligible official events, target-region stages, and broader natural-hazard context. The heat layer represents <strong>official signal load</strong>, not the probability of a disaster.</p>
       <p class="disc"><strong>Not a prediction or emergency-warning service.</strong> Earthquakes cannot be predicted by this page. For immediate instructions, follow the linked issuing agency and local emergency management.</p>
     </section>
 
@@ -722,7 +978,7 @@ export function earthWatchHtml(): string {
     </section>
 
     <section class="metrics">
-      <div class="metric"><div class="value" id="currentCount">-</div><div class="label">Fresh current signals</div></div>
+      <div class="metric"><div class="value" id="currentCount">-</div><div class="label">Active map signals</div></div>
       <div class="metric"><div class="value" id="quakeCount">-</div><div class="label">Earthquakes in selected window</div></div>
       <div class="metric"><div class="value" id="sourceCount">-</div><div class="label">Official sources healthy</div></div>
       <div class="metric"><div class="value" id="regionCount">-</div><div class="label">Elevated target regions</div></div>
@@ -732,7 +988,8 @@ export function earthWatchHtml(): string {
       <div class="card map-card" id="mapCard">
         <div id="map" role="application" aria-label="Official geohazard map with earthquakes, severe-weather polygons, natural events, aggregate signal heat, and configured target regions"></div>
         <div class="maphint">
-          Select a marker or polygon for official timestamps and stale-gate status. Use the map layer control to separate heat, events, and configured regions.
+          <strong id="mapFocus">Finding the strongest eligible official activity...</strong>
+          Select a marker or polygon for official timestamps, notification-gate status, and map-context eligibility. Use the map layer control to separate heat, events, and configured regions.
           <div class="legend">
             <span style="--legend:#347FAC">Earthquake</span>
             <span style="--legend:#BE2618">Severe weather</span>
@@ -773,23 +1030,23 @@ export function earthWatchHtml(): string {
   <script>
   (function() {
     "use strict";
-    var state = { data:null, window:"now", hazard:"all", layerById:{} };
+    var state = { data:null, window:"now", hazard:"all", layerById:{}, focusApplied:false };
     var colors = {
       earthquake:"#347FAC", weather:"#BE2618", natural:"#DE5F26",
       volcano:"#7A4D91", tsunami:"#246B82", space_weather:"#697B73"
     };
-    var map = L.map("map", { scrollWheelZoom:false, attributionControl:true }).setView([39.5,-98.35], 4);
+    var map = L.map("map", { scrollWheelZoom:false, attributionControl:true }).setView([20,0], 2);
     var topo = L.tileLayer("https://basemap.nationalmap.gov/arcgis/rest/services/USGSTopo/MapServer/tile/{z}/{y}/{x}", {
       maxZoom:16, attribution:"USGS The National Map"
-    }).addTo(map);
+    });
     var clean = L.tileLayer("https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png", {
       maxZoom:18, subdomains:"abcd", attribution:"OpenStreetMap and CARTO"
-    });
+    }).addTo(map);
     var heatLayer = L.layerGroup().addTo(map);
     var eventLayer = L.layerGroup().addTo(map);
     var regionLayer = L.layerGroup().addTo(map);
     L.control.layers(
-      {"USGS Topographic":topo, "Clean map":clean},
+      {"Global clean map":clean, "USGS US topographic":topo},
       {"Aggregate signal heat":heatLayer, "Official events":eventLayer, "Target regions":regionLayer},
       {collapsed:true}
     ).addTo(map);
@@ -851,11 +1108,28 @@ export function earthWatchHtml(): string {
       if (!state.data) return [];
       return state.data.map.events.filter(function(event) {
         if (state.hazard !== "all" && event.family !== state.hazard) return false;
-        if (state.window === "now") return event.status === "current" && event.staleGatePassed;
+        if (state.window === "now") return isActiveMapEvent(event);
         if (state.window === "forecast") return event.status === "forecast";
         var occurredAt = Date.parse(event.eventTime);
         return event.status !== "forecast" && occurredAt >= windowStart() && occurredAt <= Date.now();
       });
+    }
+    function isActiveMapEvent(event) {
+      return Boolean(
+        event.mapContext &&
+        event.mapContext.eligible &&
+        (event.family === "earthquake" || event.status === "current")
+      );
+    }
+    function contextWindow(hours) {
+      return hours >= 48 && hours % 24 === 0 ? (hours / 24) + "d" : hours + "h";
+    }
+    function mapContextLabel(event) {
+      if (!event.mapContext) return "unavailable";
+      if (event.mapContext.result === "magnitude_extended") {
+        return "magnitude context (" + contextWindow(event.mapContext.windowHours) + ")";
+      }
+      return event.mapContext.result + " (" + contextWindow(event.mapContext.windowHours) + ")";
     }
     function popup(event) {
       return '<div class="popup-title">' + esc(event.title) + '</div>' +
@@ -865,8 +1139,9 @@ export function earthWatchHtml(): string {
         '<div class="popup-row"><strong>Ingest time:</strong> ' + esc(fmt(event.ingestTime)) + '</div>' +
         '<div class="popup-row"><strong>Region:</strong> ' + esc(event.region || "source-defined / outside configured targets") + '</div>' +
         '<div class="popup-row"><strong>Cascade stage:</strong> ' + esc(event.cascadeStage || "context only") + '</div>' +
-        '<div class="popup-row"><strong>Stale gate:</strong> ' + esc(event.staleGateResult) + '</div>' +
-        (event.staleGateReasons.length ? '<div class="popup-row"><strong>Blocked by:</strong> ' + esc(event.staleGateReasons.join(", ")) + '</div>' : '') +
+        '<div class="popup-row"><strong>Notification stale gate:</strong> ' + esc(event.staleGateResult) + '</div>' +
+        (event.staleGateReasons.length ? '<div class="popup-row"><strong>Notification blocked by:</strong> ' + esc(event.staleGateReasons.join(", ")) + '</div>' : '') +
+        '<div class="popup-row"><strong>Map context:</strong> ' + esc(mapContextLabel(event)) + '</div>' +
         '<a class="popup-link" href="' + esc(safeUrl(event.officialUrl)) + '" target="_blank" rel="noopener">Open official record</a>';
     }
     function pointForGeometry(geometry) {
@@ -887,7 +1162,7 @@ export function earthWatchHtml(): string {
       var heat = [];
       events.forEach(function(event) {
         var color = colors[event.family] || "#697B73";
-        var opacity = event.staleGatePassed ? 0.78 : 0.28;
+        var opacity = event.mapContext && event.mapContext.eligible ? 0.78 : 0.28;
         var layer;
         if (event.geometry.type === "Point") {
           var point = pointForGeometry(event.geometry);
@@ -903,7 +1178,7 @@ export function earthWatchHtml(): string {
         layer.addTo(eventLayer);
         state.layerById[event.id] = layer;
         var heatPoint = pointForGeometry(event.geometry);
-        if (heatPoint && event.status === "current" && event.staleGatePassed) {
+        if (heatPoint && isActiveMapEvent(event)) {
           heat.push([heatPoint[0],heatPoint[1],Math.max(.15,event.score/100)]);
         }
       });
@@ -946,7 +1221,7 @@ export function earthWatchHtml(): string {
         var color = colors[event.family] || "#697B73";
         return '<button class="signal" type="button" data-event-id="' + esc(event.id) + '">' +
           '<span class="signal-bar" style="--signal:' + color + '"></span>' +
-          '<span><span class="signal-name">' + esc(event.title) + '</span><span class="signal-meta">' + esc(event.sourceLabel) + ' · ' + esc(relative(event.eventTime)) + ' · gate ' + esc(event.staleGateResult) + '</span></span>' +
+          '<span><span class="signal-name">' + esc(event.title) + '</span><span class="signal-meta">' + esc(event.sourceLabel) + ' · ' + esc(relative(event.eventTime)) + ' · map ' + esc(mapContextLabel(event)) + ' · alert gate ' + esc(event.staleGateResult) + '</span></span>' +
           '<span class="signal-score">' + esc(event.score) + '</span></button>';
       }).join("");
       Array.prototype.forEach.call(container.querySelectorAll("[data-event-id]"),function(button) {
@@ -967,7 +1242,7 @@ export function earthWatchHtml(): string {
     function renderContext() {
       var items = state.data.map.nonSpatialSignals.filter(function(event) {
         if (state.hazard !== "all" && event.family !== state.hazard) return false;
-        if (state.window === "now") return event.status === "current" && event.staleGatePassed;
+        if (state.window === "now") return isActiveMapEvent(event);
         if (state.window === "forecast") return event.status === "forecast";
         var occurredAt = Date.parse(event.eventTime);
         return event.status !== "forecast" && occurredAt >= windowStart() && occurredAt <= Date.now();
@@ -977,7 +1252,7 @@ export function earthWatchHtml(): string {
         var color = colors[event.family] || "#697B73";
         return '<a class="signal" href="' + esc(safeUrl(event.officialUrl)) + '" target="_blank" rel="noopener">' +
           '<span class="signal-bar" style="--signal:' + color + '"></span>' +
-          '<span><span class="signal-name">' + esc(event.title) + '</span><span class="signal-meta">' + esc(event.sourceLabel) + ' · ' + esc(relative(event.eventTime)) + ' · gate ' + esc(event.staleGateResult) + '</span></span>' +
+          '<span><span class="signal-name">' + esc(event.title) + '</span><span class="signal-meta">' + esc(event.sourceLabel) + ' · ' + esc(relative(event.eventTime)) + ' · map ' + esc(mapContextLabel(event)) + ' · alert gate ' + esc(event.staleGateResult) + '</span></span>' +
           '<span class="signal-score">' + esc(event.score) + '</span></a>';
       }).join("") : '<div class="empty">No non-spatial signal in this view.</div>';
     }
@@ -1010,10 +1285,15 @@ export function earthWatchHtml(): string {
       document.getElementById("postureDetail").textContent = data.posture.detail;
       document.getElementById("fresh").textContent = "Updated " + relative(data.generatedAt);
       document.getElementById("liveDot").classList.toggle("stale",data.posture.sourceHealth !== "healthy");
-      document.getElementById("currentCount").textContent = String(data.summary.currentFreshSignals);
+      document.getElementById("currentCount").textContent = String(data.summary.activeMapSignals);
       document.getElementById("regionCount").textContent = String(data.map.regions.filter(function(region){ return Number(region.effectiveStage.slice(1)) >= 2; }).length);
+      document.getElementById("mapFocus").textContent = data.map.focus.mode === "signal_cluster" ? "Top activity: " + data.map.focus.label + "." : "No eligible global signal; showing the United States fallback.";
       document.getElementById("method").textContent = data.map.method + " " + data.map.coverage;
       renderNotable(); renderSources(); renderRegions(); renderMap(); renderContext();
+    }
+    function applyDefaultFocus() {
+      if (!state.data || !state.data.map.focus) return;
+      map.setView(state.data.map.focus.center,state.data.map.focus.zoom);
     }
     async function load() {
       try {
@@ -1024,6 +1304,10 @@ export function earthWatchHtml(): string {
         state.data = data;
         document.getElementById("error").classList.remove("on");
         render();
+        if (!state.focusApplied) {
+          applyDefaultFocus();
+          state.focusApplied = true;
+        }
       } catch (error) {
         document.getElementById("liveDot").classList.add("stale");
         document.getElementById("fresh").textContent = "Official data unavailable";
@@ -1043,7 +1327,7 @@ export function earthWatchHtml(): string {
     document.getElementById("hazardFilter").addEventListener("change",function(event) {
       state.hazard = event.target.value; renderMap(); renderContext();
     });
-    document.getElementById("resetUs").addEventListener("click",function(){ map.setView([39.5,-98.35],4); });
+    document.getElementById("resetFocus").addEventListener("click",applyDefaultFocus);
     document.getElementById("locate").addEventListener("click",function() {
       if (!navigator.geolocation) return;
       navigator.geolocation.getCurrentPosition(function(position) {

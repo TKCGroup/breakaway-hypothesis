@@ -154,3 +154,12 @@
   errors, and route playback advanced in chase mode.
 - `DRY_RUN=false`, Slack channel `C0AS8NB0LQY`, Cloud SQL, secret bindings,
   runtime service account, and Scheduler configuration were preserved.
+
+## Global Major-Event Map Persistence — 2026-07-29
+
+- [x] Add a map-only, magnitude-scaled earthquake context window without changing the notification stale gate.
+- [x] Keep M4-M5 earthquakes for 24 hours, M6 for 72 hours, and M7+ for 7 days; keep smaller events on the 2-hour map window.
+- [x] Auto-focus the default map on the strongest eligible global official-signal cluster, with an explicit fallback view.
+- [x] Disclose notification-gate and map-context results separately in the API and map UI.
+- [x] Add regression tests for the live M7 visibility failure, threshold boundaries, global focus, and fallback behavior.
+- [x] Pass typecheck, 79 tests, build, diff, inline-script syntax, live-snapshot simulation, and responsive browser verification before requesting Altbot deployment.

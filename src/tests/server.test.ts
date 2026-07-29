@@ -95,9 +95,12 @@ describe("watcher HTTP server", () => {
       );
       expect(response.headers.get("x-content-type-options")).toBe("nosniff");
       const html = await response.text();
-      expect(html).toContain("US Geohazard Watch");
+      expect(html).toContain("Official Geohazard Watch");
       expect(html).toContain("leaflet");
       expect(html).toContain("Not a prediction");
+      expect(html).toContain("Notification stale gate");
+      expect(html).toContain("Top activity");
+      expect(html).toContain("applyDefaultFocus");
       expect(html).toContain('data-window="forecast"');
       expect(html).toContain('href="/visualizations"');
       expect(html).toContain('aria-current="page">Live conditions');
@@ -196,7 +199,11 @@ describe("watcher HTTP server", () => {
         },
         map: {
           events: [],
-          nonSpatialSignals: []
+          nonSpatialSignals: [],
+          focus: {
+            mode: "us_fallback",
+            center: [39.5, -98.35]
+          }
         }
       });
     } finally {

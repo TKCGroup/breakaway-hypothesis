@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_CONFIG } from "../config.js";
 import type { DashboardSnapshot } from "../dashboard.js";
-import { buildEarthWatchData } from "../earth.js";
+import {
+  buildEarthWatchData,
+  earthquakeMapContextWindowHours
+} from "../earth.js";
 import { eventFixture, NOW } from "./helpers.js";
 
 describe("Earth Watch data", () => {
@@ -112,7 +115,12 @@ describe("Earth Watch data", () => {
       },
       cascadeStage: "S3",
       staleGatePassed: true,
-      staleGateResult: "passed"
+      staleGateResult: "passed",
+      mapContext: {
+        eligible: true,
+        result: "fresh",
+        windowHours: 24
+      }
     });
     expect(data.map.events.find((event) => event.id === "weather")).toMatchObject({
       source: "nws_alerts",
@@ -122,6 +130,10 @@ describe("Earth Watch data", () => {
         type: "Polygon"
       },
       staleGatePassed: true
+    });
+    expect(data.map.focus).toMatchObject({
+      mode: "signal_cluster",
+      center: [35.15, -97.1]
     });
     expect(data.map.events.find((event) => event.id === "eonet")).toMatchObject({
       source: "nasa_eonet",
@@ -210,8 +222,138 @@ describe("Earth Watch data", () => {
         (region) => region.id === "CARIBBEAN_VENEZUELA_COMPARATOR"
       )
     ).toBe(false);
+    expect(data.map.focus).toEqual({
+      mode: "us_fallback",
+      center: [39.5, -98.35],
+      zoom: 4,
+      score: 0,
+      label: "United States fallback",
+      eventIds: []
+    });
+  });
+
+  it("keeps major earthquakes in map context without bypassing the notification stale gate", () => {
+    const snapshot = emptySnapshot();
+    snapshot.events = [
+      eventFixture({
+        id: "japan-major",
+        externalId: "japan-major",
+        title: "M 7.1 - east of Japan",
+        eventTime: new Date("2026-07-07T06:00:00.000Z"),
+        sourceUpdatedAt: new Date("2026-07-07T06:30:00.000Z"),
+        ingestTime: new Date("2026-07-07T06:35:00.000Z"),
+        region: undefined,
+        lat: 38.1,
+        lon: 142.4,
+        magnitude: 7.1
+      }),
+      eventFixture({
+        id: "small-current",
+        externalId: "small-current",
+        title: "M 2.4 - current United States event"
+      })
+    ];
+
+    const data = buildEarthWatchData(snapshot, DEFAULT_CONFIG, NOW);
+    const major = data.map.events.find((event) => event.id === "japan-major");
+
+    expect(major).toMatchObject({
+      staleGatePassed: false,
+      staleGateResult: "blocked",
+      mapContext: {
+        eligible: true,
+        result: "magnitude_extended",
+        windowHours: 168,
+        eventAgeHours: 30,
+        sourceAgeHours: 29.5
+      }
+    });
+    expect(major?.staleGateReasons).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(/^event_time_outside_max_age:/),
+        expect.stringMatching(/^source_updated_at_stale:/)
+      ])
+    );
+    expect(data.summary.currentFreshSignals).toBe(1);
+    expect(data.summary.activeMapSignals).toBe(2);
+    expect(data.map.focus).toMatchObject({
+      mode: "signal_cluster",
+      center: [38.1, 142.4],
+      eventIds: ["japan-major"]
+    });
+  });
+
+  it("applies the disclosed magnitude windows at their boundaries", () => {
+    expect([
+      earthquakeMapContextWindowHours(3.9),
+      earthquakeMapContextWindowHours(4),
+      earthquakeMapContextWindowHours(5.9),
+      earthquakeMapContextWindowHours(6),
+      earthquakeMapContextWindowHours(6.9),
+      earthquakeMapContextWindowHours(7)
+    ]).toEqual([2, 24, 24, 72, 72, 168]);
+
+    const snapshot = emptySnapshot();
+    const dateConflict = agedEarthquake("m7-date-conflict", 7.2, 30);
+    dateConflict.title = "M 7.2 - conflicting 2025 catalog label";
+    snapshot.events = [
+      agedEarthquake("m3-expired", 3.9, 3),
+      eventFixture({
+        id: "m3-feed-updated",
+        externalId: "m3-feed-updated",
+        title: "M 3.9 - source refreshed after map window",
+        eventTime: new Date(NOW.getTime() - 3 * 3_600_000),
+        sourceUpdatedAt: NOW,
+        magnitude: 3.9,
+        region: undefined
+      }),
+      agedEarthquake("m5-active", 5.9, 23),
+      agedEarthquake("m5-expired", 5.9, 25),
+      agedEarthquake("m6-active", 6.2, 71),
+      agedEarthquake("m7-expired", 7.2, 169),
+      dateConflict
+    ];
+
+    const byId = new Map(
+      buildEarthWatchData(snapshot, DEFAULT_CONFIG, NOW).map.events.map(
+        (event) => [event.id, event]
+      )
+    );
+    expect(byId.get("m3-expired")?.mapContext.eligible).toBe(false);
+    expect(byId.get("m3-feed-updated")?.staleGatePassed).toBe(true);
+    expect(byId.get("m3-feed-updated")?.mapContext.eligible).toBe(false);
+    expect(byId.get("m5-active")?.mapContext.result).toBe(
+      "magnitude_extended"
+    );
+    expect(byId.get("m5-expired")?.mapContext.eligible).toBe(false);
+    expect(byId.get("m6-active")?.mapContext.result).toBe(
+      "magnitude_extended"
+    );
+    expect(byId.get("m7-expired")?.mapContext.eligible).toBe(false);
+    expect(byId.get("m7-date-conflict")?.staleGateReasons).toContain(
+      "title_or_body_date_conflicts_with_feed_timestamp"
+    );
+    expect(byId.get("m7-date-conflict")?.mapContext.eligible).toBe(false);
   });
 });
+
+function agedEarthquake(
+  id: string,
+  magnitude: number,
+  ageHours: number
+): ReturnType<typeof eventFixture> {
+  const occurredAt = new Date(NOW.getTime() - ageHours * 3_600_000);
+  return eventFixture({
+    id,
+    externalId: id,
+    title: `M ${magnitude.toFixed(1)} - map context boundary test`,
+    eventTime: occurredAt,
+    sourceUpdatedAt: occurredAt,
+    ingestTime: occurredAt,
+    magnitude,
+    region: undefined
+  });
+}
 
 function emptySnapshot(): DashboardSnapshot {
   return {
