@@ -190,23 +190,168 @@ export function buildEarthWatchData(
 }
 
 function dedupeLiveEvents(events: NormalizedEvent[]): NormalizedEvent[] {
-  const byKey = new Map<string, NormalizedEvent>();
+  const byExactKey = new Map<string, NormalizedEvent>();
   for (const event of events) {
     const key =
       event.eventType === "earthquake"
         ? `earthquake:${event.externalId}`
         : `${event.source}:${event.externalId}`;
-    const existing = byKey.get(key);
-    if (
-      !existing ||
-      (event.source === "usgs_earthquake_geojson" &&
-        existing.source === "usgs_fdsn_backfill") ||
-      event.sourceUpdatedAt > existing.sourceUpdatedAt
-    ) {
-      byKey.set(key, event);
+    const existing = byExactKey.get(key);
+    if (!existing || preferredDuplicate(event, existing) > 0) {
+      byExactKey.set(key, event);
     }
   }
-  return [...byKey.values()];
+
+  const unique = [...byExactKey.values()];
+  const earthquakes = unique.filter(
+    (event) => event.eventType === "earthquake"
+  );
+  const otherEvents = unique.filter(
+    (event) => event.eventType !== "earthquake"
+  );
+  return [...otherEvents, ...dedupeEarthquakeAliases(earthquakes)];
+}
+
+function dedupeEarthquakeAliases(
+  earthquakes: NormalizedEvent[]
+): NormalizedEvent[] {
+  const parents = earthquakes.map((_, index) => index);
+  const findRoot = (index: number): number => {
+    let current = index;
+    while (parents[current] !== current) {
+      parents[current] = parents[parents[current]!]!;
+      current = parents[current]!;
+    }
+    return current;
+  };
+  const merge = (left: number, right: number): void => {
+    const leftRoot = findRoot(left);
+    const rightRoot = findRoot(right);
+    if (leftRoot !== rightRoot) parents[rightRoot] = leftRoot;
+  };
+
+  const ownerByAlias = new Map<string, number>();
+  earthquakes.forEach((event, index) => {
+    for (const alias of earthquakeAliases(event)) {
+      const owner = ownerByAlias.get(alias);
+      if (owner === undefined) {
+        ownerByAlias.set(alias, index);
+      } else {
+        merge(owner, index);
+      }
+    }
+  });
+
+  const byTime = earthquakes
+    .map((event, index) => ({ event, index }))
+    .sort(
+      (a, b) => a.event.eventTime.getTime() - b.event.eventTime.getTime()
+    );
+  for (let left = 0; left < byTime.length; left += 1) {
+    for (let right = left + 1; right < byTime.length; right += 1) {
+      const timeDifference =
+        byTime[right]!.event.eventTime.getTime() -
+        byTime[left]!.event.eventTime.getTime();
+      if (timeDifference > 90_000) break;
+      if (fuzzyEarthquakeMatch(byTime[left]!.event, byTime[right]!.event)) {
+        merge(byTime[left]!.index, byTime[right]!.index);
+      }
+    }
+  }
+
+  const preferredByRoot = new Map<number, NormalizedEvent>();
+  earthquakes.forEach((event, index) => {
+    const root = findRoot(index);
+    const existing = preferredByRoot.get(root);
+    if (!existing || preferredDuplicate(event, existing) > 0) {
+      preferredByRoot.set(root, event);
+    }
+  });
+  return [...preferredByRoot.values()];
+}
+
+function earthquakeAliases(event: NormalizedEvent): Set<string> {
+  const aliases = new Set<string>([event.externalId]);
+  const raw = asObject(event.rawJson);
+  const properties = objectField(raw, "properties");
+  const ids = properties.ids;
+  if (typeof ids === "string") {
+    for (const id of ids.split(",")) {
+      const normalized = id.trim();
+      if (normalized) aliases.add(normalized);
+    }
+  } else if (Array.isArray(ids)) {
+    for (const id of ids) {
+      if (typeof id === "string" && id.trim()) aliases.add(id.trim());
+    }
+  }
+  if (typeof raw.id === "string" && raw.id.trim()) {
+    aliases.add(raw.id.trim());
+  }
+  return aliases;
+}
+
+function fuzzyEarthquakeMatch(
+  left: NormalizedEvent,
+  right: NormalizedEvent
+): boolean {
+  if (
+    left.magnitude === undefined ||
+    right.magnitude === undefined ||
+    left.lat === undefined ||
+    left.lon === undefined ||
+    right.lat === undefined ||
+    right.lon === undefined
+  ) {
+    return false;
+  }
+  return (
+    Math.abs(
+      left.eventTime.getTime() - right.eventTime.getTime()
+    ) <= 90_000 &&
+    Math.abs(left.magnitude - right.magnitude) <= 0.300_001 &&
+    distanceKm([left.lat, left.lon], [right.lat, right.lon]) <= 50
+  );
+}
+
+function preferredDuplicate(
+  candidate: NormalizedEvent,
+  existing: NormalizedEvent
+): number {
+  const sourceDifference =
+    earthquakeSourcePriority(candidate.source) -
+    earthquakeSourcePriority(existing.source);
+  if (sourceDifference !== 0) return sourceDifference;
+
+  if (
+    candidate.eventType === "earthquake" &&
+    existing.eventType === "earthquake"
+  ) {
+    const reviewDifference =
+      earthquakeReviewPriority(candidate) -
+      earthquakeReviewPriority(existing);
+    if (reviewDifference !== 0) return reviewDifference;
+  }
+
+  const updateDifference =
+    candidate.sourceUpdatedAt.getTime() - existing.sourceUpdatedAt.getTime();
+  if (updateDifference !== 0) return updateDifference;
+  const ingestDifference =
+    candidate.ingestTime.getTime() - existing.ingestTime.getTime();
+  if (ingestDifference !== 0) return ingestDifference;
+  return candidate.id.localeCompare(existing.id);
+}
+
+function earthquakeSourcePriority(source: string): number {
+  return source === "usgs_earthquake_geojson"
+    ? 2
+    : source === "usgs_fdsn_backfill"
+      ? 1
+      : 0;
+}
+
+function earthquakeReviewPriority(event: NormalizedEvent): number {
+  return /^reviewed$/i.test(event.severity ?? "") ? 1 : 0;
 }
 
 function earthMapEvent(
@@ -226,7 +371,7 @@ function earthMapEvent(
     externalId: event.externalId,
     eventType: event.eventType,
     family,
-    title: event.title,
+    title: event.title.trim(),
     eventTime: event.eventTime.toISOString(),
     sourceUpdatedAt: event.sourceUpdatedAt.toISOString(),
     ingestTime: event.ingestTime.toISOString(),
@@ -846,6 +991,14 @@ export function earthWatchHtml(): string {
       font-family:"Barlow Condensed",sans-serif; text-transform:uppercase; letter-spacing:.08em;
       color:var(--muted); font-size:13px; font-weight:600;
     }
+    .signal-panel-head { align-items:center; }
+    .signal-panel-tools { display:flex; align-items:center; gap:7px; }
+    .sort-control { display:flex; align-items:center; gap:5px; white-space:nowrap; }
+    .sort-field {
+      min-height:30px; max-width:104px; border:1px solid var(--hair); border-radius:3px;
+      background:var(--panel); color:var(--ink); padding:0 6px; font-family:system-ui,-apple-system,"Segoe UI",sans-serif;
+      font-size:11px; letter-spacing:0; text-transform:none;
+    }
     .notable-head { display:block; }
     .notable-head span:last-child { display:block; margin-top:2px; }
     .notable-title { display:block; margin:7px 0 2px; font-size:17px; line-height:1.3; }
@@ -909,6 +1062,8 @@ export function earthWatchHtml(): string {
       .segmented button { flex:1; padding:0 7px; }
       .control-actions { width:100%; display:grid; grid-template-columns:1fr 1fr; }
       .control-actions select { grid-column:1 / -1; }
+      .signal-panel-head { align-items:flex-start; }
+      .signal-panel-tools { align-items:flex-end; flex-direction:column-reverse; gap:4px; }
       .banner { grid-template-columns:1fr; gap:8px; }
       .metrics { grid-template-columns:repeat(2,minmax(0,1fr)); }
       #map { height:390px; }
@@ -956,6 +1111,14 @@ export function earthWatchHtml(): string {
           <option value="volcano">Volcanoes</option>
           <option value="tsunami">Tsunami</option>
           <option value="space_weather">Space weather</option>
+        </select>
+        <select id="sourceFilter" class="field" aria-label="Official source">
+          <option value="all">All official sources</option>
+          <option value="usgs">USGS</option>
+          <option value="nws">NOAA/NWS</option>
+          <option value="swpc">NOAA/SWPC</option>
+          <option value="nasa">NASA</option>
+          <option value="tsunami">NOAA Tsunami</option>
         </select>
         <button type="button" class="pbtn" id="resetFocus">Top activity</button>
         <button type="button" class="pbtn" id="locate">Use my location</button>
@@ -1006,7 +1169,19 @@ export function earthWatchHtml(): string {
           <div id="notable"><div class="empty">Loading...</div></div>
         </section>
         <section class="sec">
-          <div class="sec-title"><span>Signals in selected window</span><span class="mono" id="signalCount">0</span></div>
+          <div class="sec-title signal-panel-head">
+            <span>Signals in selected window</span>
+            <span class="signal-panel-tools">
+              <label class="sort-control" for="signalSort"><span>Rank</span>
+                <select id="signalSort" class="sort-field">
+                  <option value="score">Score</option>
+                  <option value="lastActive">Last active</option>
+                  <option value="magnitude">Magnitude</option>
+                </select>
+              </label>
+              <span class="mono" id="signalCount">0</span>
+            </span>
+          </div>
           <div class="signals" id="signals"><div class="empty">Loading...</div></div>
         </section>
         <section class="sec">
@@ -1030,7 +1205,13 @@ export function earthWatchHtml(): string {
   <script>
   (function() {
     "use strict";
-    var state = { data:null, window:"now", hazard:"all", layerById:{}, focusApplied:false };
+    var state = { data:null, window:"now", hazard:"all", source:"all", sort:"score", layerById:{}, focusApplied:false };
+    try {
+      var storedSort = localStorage.getItem("earthWatch.signalSort");
+      if (storedSort === "score" || storedSort === "lastActive" || storedSort === "magnitude") {
+        state.sort = storedSort;
+      }
+    } catch (error) {}
     var colors = {
       earthquake:"#347FAC", weather:"#BE2618", natural:"#DE5F26",
       volcano:"#7A4D91", tsunami:"#246B82", space_weather:"#697B73"
@@ -1108,11 +1289,20 @@ export function earthWatchHtml(): string {
       if (!state.data) return [];
       return state.data.map.events.filter(function(event) {
         if (state.hazard !== "all" && event.family !== state.hazard) return false;
+        if (state.source !== "all" && sourceGroup(event.source) !== state.source) return false;
         if (state.window === "now") return isActiveMapEvent(event);
         if (state.window === "forecast") return event.status === "forecast";
         var occurredAt = Date.parse(event.eventTime);
         return event.status !== "forecast" && occurredAt >= windowStart() && occurredAt <= Date.now();
       });
+    }
+    function sourceGroup(source) {
+      if (source.indexOf("usgs_") === 0) return "usgs";
+      if (source === "nws_alerts") return "nws";
+      if (source.indexOf("swpc_") === 0) return "swpc";
+      if (source.indexOf("nasa_") === 0) return "nasa";
+      if (source.indexOf("tsunami_") === 0) return "tsunami";
+      return "other";
     }
     function isActiveMapEvent(event) {
       return Boolean(
@@ -1217,16 +1407,17 @@ export function earthWatchHtml(): string {
         container.innerHTML = '<div class="empty">No qualifying official signals in this view.</div>';
         return;
       }
-      container.innerHTML = events.slice(0,12).map(function(event) {
+      var rankedEvents = sortSignals(events);
+      container.innerHTML = rankedEvents.slice(0,12).map(function(event) {
         var color = colors[event.family] || "#697B73";
-        return '<button class="signal" type="button" data-event-id="' + esc(event.id) + '">' +
+        return '<button class="signal" type="button" data-event-id="' + esc(event.id) + '" title="' + esc(signalTooltip(event)) + '">' +
           '<span class="signal-bar" style="--signal:' + color + '"></span>' +
-          '<span><span class="signal-name">' + esc(event.title) + '</span><span class="signal-meta">' + esc(event.sourceLabel) + ' · ' + esc(relative(event.eventTime)) + ' · map ' + esc(mapContextLabel(event)) + ' · alert gate ' + esc(event.staleGateResult) + '</span></span>' +
+          '<span><span class="signal-name">' + esc(event.title) + '</span><span class="signal-meta">' + esc(event.sourceLabel) + quakeDetails(event) + ' · ' + esc(relative(event.eventTime)) + ' · map ' + esc(mapContextLabel(event)) + ' · alert gate ' + esc(event.staleGateResult) + '</span></span>' +
           '<span class="signal-score">' + esc(event.score) + '</span></button>';
       }).join("");
       Array.prototype.forEach.call(container.querySelectorAll("[data-event-id]"),function(button) {
         button.addEventListener("click",function() {
-          var event = events.find(function(candidate){ return candidate.id === button.getAttribute("data-event-id"); });
+          var event = rankedEvents.find(function(candidate){ return candidate.id === button.getAttribute("data-event-id"); });
           if (!event) return;
           var point = pointForGeometry(event.geometry);
           if (point) map.setView(point,Math.max(map.getZoom(),6));
@@ -1239,14 +1430,51 @@ export function earthWatchHtml(): string {
         });
       });
     }
+    function sortSignals(events) {
+      return events.slice().sort(function(left,right) {
+        if (state.sort === "lastActive") {
+          return Date.parse(right.eventTime) - Date.parse(left.eventTime) ||
+            Date.parse(right.sourceUpdatedAt) - Date.parse(left.sourceUpdatedAt) ||
+            right.score - left.score ||
+            left.id.localeCompare(right.id);
+        }
+        if (state.sort === "magnitude") {
+          var leftMagnitude = Number.isFinite(left.magnitude) ? left.magnitude : -Infinity;
+          var rightMagnitude = Number.isFinite(right.magnitude) ? right.magnitude : -Infinity;
+          return rightMagnitude - leftMagnitude ||
+            right.score - left.score ||
+            Date.parse(right.eventTime) - Date.parse(left.eventTime) ||
+            left.id.localeCompare(right.id);
+        }
+        return right.score - left.score ||
+          Date.parse(right.eventTime) - Date.parse(left.eventTime) ||
+          Date.parse(right.sourceUpdatedAt) - Date.parse(left.sourceUpdatedAt) ||
+          left.id.localeCompare(right.id);
+      });
+    }
+    function quakeDetails(event) {
+      if (event.family !== "earthquake") return "";
+      var details = [];
+      if (Number.isFinite(event.magnitude)) details.push("M" + Number(event.magnitude).toFixed(1));
+      if (Number.isFinite(event.depthKm)) {
+        var depth = Number(event.depthKm);
+        details.push((depth < 10 ? depth.toFixed(1) : Math.round(depth)) + " km depth");
+      }
+      return details.length ? " · " + esc(details.join(" · ")) : "";
+    }
+    function signalTooltip(event) {
+      return "Event time: " + fmt(event.eventTime) + " (" + event.eventTime + ")" +
+        " | Source updated: " + fmt(event.sourceUpdatedAt) + " (" + event.sourceUpdatedAt + ")";
+    }
     function renderContext() {
-      var items = state.data.map.nonSpatialSignals.filter(function(event) {
+      var items = sortSignals(state.data.map.nonSpatialSignals.filter(function(event) {
         if (state.hazard !== "all" && event.family !== state.hazard) return false;
+        if (state.source !== "all" && sourceGroup(event.source) !== state.source) return false;
         if (state.window === "now") return isActiveMapEvent(event);
         if (state.window === "forecast") return event.status === "forecast";
         var occurredAt = Date.parse(event.eventTime);
         return event.status !== "forecast" && occurredAt >= windowStart() && occurredAt <= Date.now();
-      });
+      }));
       document.getElementById("contextCount").textContent = String(items.length);
       document.getElementById("contextSignals").innerHTML = items.length ? items.slice(0,8).map(function(event) {
         var color = colors[event.family] || "#697B73";
@@ -1326,6 +1554,15 @@ export function earthWatchHtml(): string {
     });
     document.getElementById("hazardFilter").addEventListener("change",function(event) {
       state.hazard = event.target.value; renderMap(); renderContext();
+    });
+    document.getElementById("sourceFilter").addEventListener("change",function(event) {
+      state.source = event.target.value; renderMap(); renderContext();
+    });
+    document.getElementById("signalSort").value = state.sort;
+    document.getElementById("signalSort").addEventListener("change",function(event) {
+      state.sort = event.target.value;
+      try { localStorage.setItem("earthWatch.signalSort",state.sort); } catch (error) {}
+      renderSignals(selectedEvents()); renderContext();
     });
     document.getElementById("resetFocus").addEventListener("click",applyDefaultFocus);
     document.getElementById("locate").addEventListener("click",function() {

@@ -302,7 +302,7 @@ describe("Earth Watch data", () => {
         id: "m3-feed-updated",
         externalId: "m3-feed-updated",
         title: "M 3.9 - source refreshed after map window",
-        eventTime: new Date(NOW.getTime() - 3 * 3_600_000),
+        eventTime: new Date(NOW.getTime() - 3.5 * 3_600_000),
         sourceUpdatedAt: NOW,
         magnitude: 3.9,
         region: undefined
@@ -334,6 +334,130 @@ describe("Earth Watch data", () => {
       "title_or_body_date_conflicts_with_feed_timestamp"
     );
     expect(byId.get("m7-date-conflict")?.mapContext.eligible).toBe(false);
+  });
+
+  it("collapses official USGS aliases to the newest reviewed canonical event", () => {
+    const snapshot = emptySnapshot();
+    snapshot.events = [
+      eventFixture({
+        id: "pt-alias",
+        externalId: "pt26209004",
+        title: "M 7.1 - 4 km SE of Uki, Japan",
+        eventTime: new Date("2026-07-08T11:28:00.000Z"),
+        sourceUpdatedAt: new Date("2026-07-08T11:36:32.000Z"),
+        lat: 32.6,
+        lon: 130.7,
+        magnitude: 7.1,
+        severity: "REVIEWED"
+      }),
+      eventFixture({
+        id: "at-alias",
+        externalId: "attivjdk",
+        title: "M 7.1 - 4 km SE of Uki, Japan",
+        eventTime: new Date("2026-07-08T11:27:39.000Z"),
+        sourceUpdatedAt: new Date("2026-07-08T11:07:39.000Z"),
+        lat: 32.6,
+        lon: 130.7,
+        magnitude: 7.1,
+        severity: "automatic"
+      }),
+      eventFixture({
+        id: "canonical",
+        externalId: "us6000tgb9",
+        title: "M 6.8 - Uto, Japan Earthquake",
+        eventTime: new Date("2026-07-08T11:24:15.512Z"),
+        sourceUpdatedAt: new Date("2026-07-08T11:55:37.000Z"),
+        lat: 32.6817,
+        lon: 130.7217,
+        magnitude: 6.8,
+        severity: "reviewed",
+        rawJson: {
+          id: "us6000tgb9",
+          properties: {
+            ids: ",attivjdk,pt26209004,us6000tgb9,"
+          }
+        }
+      })
+    ];
+
+    const data = buildEarthWatchData(snapshot, DEFAULT_CONFIG, NOW);
+
+    expect(data.map.events).toHaveLength(1);
+    expect(data.map.events[0]).toMatchObject({
+      id: "canonical",
+      externalId: "us6000tgb9",
+      magnitude: 6.8,
+      severity: "reviewed"
+    });
+    expect(data.summary.activeMapSignals).toBe(1);
+    expect(data.map.focus.eventIds).toEqual(["canonical"]);
+  });
+
+  it("uses bounded fuzzy earthquake deduplication without merging near misses", () => {
+    const snapshot = emptySnapshot();
+    snapshot.events = [
+      eventFixture({
+        id: "fuzzy-preliminary",
+        externalId: "fuzzy-preliminary",
+        eventTime: new Date("2026-07-08T11:00:00.000Z"),
+        sourceUpdatedAt: new Date("2026-07-08T11:05:00.000Z"),
+        lat: 32.6,
+        lon: 130.7,
+        magnitude: 6.9,
+        severity: "automatic"
+      }),
+      eventFixture({
+        id: "fuzzy-reviewed",
+        externalId: "fuzzy-reviewed",
+        eventTime: new Date("2026-07-08T11:01:00.000Z"),
+        sourceUpdatedAt: new Date("2026-07-08T11:50:00.000Z"),
+        lat: 32.68,
+        lon: 130.72,
+        magnitude: 6.7,
+        severity: "reviewed"
+      }),
+      eventFixture({
+        id: "outside-time",
+        externalId: "outside-time",
+        eventTime: new Date("2026-07-08T11:02:31.000Z"),
+        lat: 32.68,
+        lon: 130.72,
+        magnitude: 6.7
+      }),
+      eventFixture({
+        id: "outside-distance",
+        externalId: "outside-distance",
+        eventTime: new Date("2026-07-08T11:00:20.000Z"),
+        lat: 33.2,
+        lon: 130.7,
+        magnitude: 6.9
+      }),
+      eventFixture({
+        id: "outside-magnitude",
+        externalId: "outside-magnitude",
+        eventTime: new Date("2026-07-08T11:00:30.000Z"),
+        lat: 32.6,
+        lon: 130.7,
+        magnitude: 6.3
+      })
+    ];
+
+    const ids = buildEarthWatchData(
+      snapshot,
+      DEFAULT_CONFIG,
+      NOW
+    ).map.events.map((event) => event.id);
+
+    expect(ids).toHaveLength(4);
+    expect(ids).toContain("fuzzy-reviewed");
+    expect(ids).not.toContain("fuzzy-preliminary");
+    expect(ids).toEqual(
+      expect.arrayContaining([
+        "outside-time",
+        "outside-distance",
+        "outside-magnitude"
+      ])
+    );
   });
 });
 

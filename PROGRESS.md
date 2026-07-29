@@ -163,3 +163,13 @@
 - [x] Disclose notification-gate and map-context results separately in the API and map UI.
 - [x] Add regression tests for the live M7 visibility failure, threshold boundaries, global focus, and fallback behavior.
 - [x] Pass typecheck, 79 tests, build, diff, inline-script syntax, live-snapshot simulation, and responsive browser verification before requesting Altbot deployment.
+
+## Earth Signal List Parity And Deduplication — 2026-07-29
+
+- [x] Confirm the live USGS alias/revision duplicate mechanism from official event detail records.
+- [x] Deduplicate earthquake aliases server-side using authoritative USGS association IDs with a bounded time/distance/magnitude fallback.
+- [x] Add Score, Last active, and Magnitude ranking modes with a persisted browser preference.
+- [x] Add grouped official-source filtering without changing `/api/earth` request semantics.
+- [x] Add compact earthquake magnitude/depth details and absolute event/update timestamps on hover.
+- [x] Preserve row-to-map focus, notification stale-gate isolation, and official-source-only behavior.
+- [x] Pass typecheck, 81 tests, build, diff, inline-script syntax, live-snapshot simulation, and responsive browser verification before requesting Altbot deployment.

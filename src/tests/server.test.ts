@@ -101,6 +101,12 @@ describe("watcher HTTP server", () => {
       expect(html).toContain("Notification stale gate");
       expect(html).toContain("Top activity");
       expect(html).toContain("applyDefaultFocus");
+      expect(html).toContain('id="signalSort"');
+      expect(html).toContain('value="lastActive"');
+      expect(html).toContain('value="magnitude"');
+      expect(html).toContain('id="sourceFilter"');
+      expect(html).toContain("earthWatch.signalSort");
+      expect(html).toContain("km depth");
       expect(html).toContain('data-window="forecast"');
       expect(html).toContain('href="/visualizations"');
       expect(html).toContain('aria-current="page">Live conditions');
