@@ -138,3 +138,19 @@
 - [x] Add route, security-header, and static visualization tests.
 - [x] Pass typecheck, tests, build, diff, embedded-script syntax, and responsive WebGL verification.
 - [x] Push the verified commit and request the production rollout from Altbot.
+
+## Public Visualizations Production Receipt — 2026-07-26
+
+- Visualization code: `6d7541d Add interactive Barkley visualization`.
+- Deployed source HEAD: `02f2974 Record visualization release handoff`.
+- Live Cloud Run revision: `breakaway-hypothesis-watcher-00016-s9d`, 100% traffic.
+- Public URL: `https://earth.tkcgroup.co/visualizations`.
+- Cloudflare Worker `tkcgroup-earth-watch` now passes through `/visualizations`
+  and `/assets/three-0.180.0/*`; root and `/api/earth` behavior are unchanged.
+- Independent edge checks returned HTTP 200 for the visualization, both Three.js
+  modules, root, API, and origin `/healthz/`.
+- Live desktop and 390px mobile WebGL checks passed: nonzero canvas dimensions,
+  11 projected labels, no horizontal overflow, no visualization-specific console
+  errors, and route playback advanced in chase mode.
+- `DRY_RUN=false`, Slack channel `C0AS8NB0LQY`, Cloud SQL, secret bindings,
+  runtime service account, and Scheduler configuration were preserved.
