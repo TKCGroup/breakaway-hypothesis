@@ -238,6 +238,82 @@ describe("earthWatchHtml honesty of claims", () => {
     expect(html).toContain("not reported");
   });
 
+  it("does not send the non-spatial list straight to a raw API document", () => {
+    // The bug this replaces: those rows were anchors to event.officialUrl, which
+    // for an NWS alert is the api.weather.gov JSON document. humanDestination()
+    // needs a point to build a readable destination, and this list is BY
+    // DEFINITION the events with no point — so the one guard that would have
+    // caught it was structurally unable to fire for exactly these rows.
+    expect(html).toContain('data-context-id="');
+    expect(html).toContain("function showNonSpatialOnMap");
+    expect(html).not.toContain('<a class="signal" href=');
+  });
+
+  it("distinguishes an alert with no zones from a failed zone request", () => {
+    // Same family as the sparkline and cyclone rules: an alert that cannot be
+    // drawn and an alert whose geometry request failed must not say the same
+    // thing, because "no location" reads as reassurance.
+    expect(html).toContain("names no forecast zone");
+    expect(html).toContain("The alert does have a location");
+    expect(html).toContain("this request for it failed");
+  });
+
+  it("says a drawn zone is the named area, not a measured hazard footprint", () => {
+    expect(html).toContain("not a measured");
+    expect(html).toContain("The alert itself carried no geometry.");
+  });
+
+  it("refuses to let a historical tsunami marker be read as a flooded place", () => {
+    // Every point in the NCEI record is the SOURCE — the quake or landslide that
+    // made the wave — and its height is the largest runup measured anywhere on the
+    // affected coast, often hundreds of km away. A circle drawn at the source with
+    // "11 m" next to it reads as "the water was 11 m here". It was not.
+    expect(html).toContain("This marker is the source, not the flooding.");
+    expect(html).toContain("many hundreds of kilometres away");
+    expect(html).toContain("largest runup");
+  });
+
+  it("says an empty tsunami feed is empty rather than showing nothing", () => {
+    // Active tsunamis are rare, so this layer's normal state is empty. An empty
+    // layer and a broken layer look identical, and here the empty one is the
+    // reassuring read — so it has to be stated, not inferred from silence.
+    expect(html).toContain("No active tsunami warning, advisory or watch");
+    expect(html).toContain("The feed answered and it was empty");
+    expect(html).toContain("not an absence of tsunamis");
+  });
+
+  it("never lets a capped tsunami history read as the whole record", () => {
+    // The history is paged and the page takes only the first few. Reporting the
+    // drawn count without the total would silently present a slice as the archive.
+    expect(html).toContain("Showing ");
+    expect(html).toContain(" of ");
+    expect(html).toContain("recorded tsunamis since 1900");
+  });
+
+  it("says a blank tsunami field is missing data rather than a zero", () => {
+    expect(html).toContain("not reported in this record");
+    expect(html).toContain("which is not the same as a zero");
+  });
+
+  it("credits the NCEI database the tsunami history comes from", () => {
+    expect(html).toContain("NOAA NCEI Global Historical Tsunami Database");
+  });
+
+  it("will not steal the map back from a reader who has moved it", () => {
+    // The reported bug: pan to Hawaii, and minutes later the map yanks itself back
+    // to the default focus. focusApplied is only set on load()'s SUCCESS path, so a
+    // failed first fetch left it false and the five-minute poll re-centred.
+    expect(html).toContain("state.userMovedMap");
+    expect(html).toContain("function applyDefaultFocus(force)");
+    expect(html).toContain("if (state.userMovedMap && force !== true) return;");
+  });
+
+  it("lets the wheel zoom the map", () => {
+    // scrollWheelZoom was false, which is what "the map feels locked" meant.
+    expect(html).toContain("scrollWheelZoom:true");
+    expect(html).not.toContain("scrollWheelZoom:false");
+  });
+
   it("keeps safeUrl refusing anything that is not https", () => {
     // If safeUrl ever stopped being the gate, the test above would still pass
     // while protecting nothing.

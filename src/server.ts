@@ -266,7 +266,17 @@ function writeHtml(
       // a browser cannot read it directly and there is nothing to gain by listing
       // it here. The page says out loud that this is a republisher, because one hop
       // from the issuing agency is not the same as the issuing agency.
-      "connect-src 'self' https://earthquake.usgs.gov https://services9.arcgis.com",
+      // api.weather.gov resolves an alert's affectedZones to a polygon. About a
+      // third of NWS alerts carry no geometry of their own and name their area
+      // only as zone references, which is why they end up in the non-spatial list;
+      // without this the page can never put them anywhere, and their only link is
+      // the raw JSON document a reader cannot use.
+      // www.ngdc.noaa.gov is NCEI's global historical tsunami database and
+      // mapservices.weather.noaa.gov carries the warning polygons for a tsunami
+      // that is happening now. Active tsunamis are rare, so the history is what
+      // the layer shows almost every day; without it the toggle would be an empty
+      // switch that looks broken.
+      "connect-src 'self' https://earthquake.usgs.gov https://services9.arcgis.com https://api.weather.gov https://www.ngdc.noaa.gov https://mapservices.weather.noaa.gov",
       "font-src https://fonts.gstatic.com",
       "form-action 'none'",
       "frame-ancestors 'none'",

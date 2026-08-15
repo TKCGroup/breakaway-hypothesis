@@ -108,6 +108,19 @@ export interface EarthEventDetail {
   issuedBy?: string;
   /** When the notice stops applying, ISO 8601. */
   expiresAt?: string;
+  /**
+   * NWS forecast/county zone URLs this alert applies to, from `affectedZones`.
+   *
+   * Roughly a third of NWS alerts ship `geometry: null` and describe their area
+   * only as zone references plus a prose `areaDesc`. Those are exactly the events
+   * that land in the non-spatial list, and until this field existed the page had
+   * nothing to put on a map for them — so their only link was the raw JSON API
+   * document. The zone endpoint returns the polygon, so the location IS knowable;
+   * it just takes a second request.
+   */
+  zones?: string[];
+  /** The agency's own prose description of the area, e.g. "Big Island Windward Waters". */
+  areaDesc?: string;
 }
 
 /**
@@ -485,7 +498,9 @@ function eventDetail(event: NormalizedEvent): EarthEventDetail | undefined {
     summary: trimmedText(properties.description) ?? trimmedText(event.body),
     instruction: trimmedText(properties.instruction),
     issuedBy: trimmedText(properties.senderName),
-    expiresAt: parseDate(properties.expires)?.toISOString()
+    expiresAt: parseDate(properties.expires)?.toISOString(),
+    zones: alertZones(properties.affectedZones),
+    areaDesc: trimmedText(properties.areaDesc)
   };
   // Do not emit a detail block whose only content repeats the title.
   if (detail.headline && detail.summary === detail.headline) delete detail.summary;
@@ -497,6 +512,36 @@ function trimmedText(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
   const text = value.trim();
   return text.length ? text : undefined;
+}
+
+/**
+ * The zone URLs an NWS alert applies to, kept only if they are api.weather.gov
+ * https URLs.
+ *
+ * The client fetches whatever comes back from here, so this is a trust boundary,
+ * not a formatting step: an arbitrary string from a third-party feed must never
+ * become the target of a browser request. The CSP is the second layer and would
+ * refuse a foreign host anyway; this is the first.
+ */
+function alertZones(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const zones: string[] = [];
+  for (const entry of value) {
+    if (typeof entry !== "string") continue;
+    let parsed: URL;
+    try {
+      parsed = new URL(entry);
+    } catch {
+      continue;
+    }
+    if (parsed.protocol !== "https:") continue;
+    if (parsed.hostname !== "api.weather.gov") continue;
+    if (!zones.includes(parsed.href)) zones.push(parsed.href);
+    // An alert can name dozens of zones. Six is enough to place it on a map, and
+    // it bounds how many requests one click can fire.
+    if (zones.length >= 6) break;
+  }
+  return zones.length ? zones : undefined;
 }
 
 function antipodeOf(event: NormalizedEvent): [number, number] | undefined {
@@ -1228,7 +1273,15 @@ export function earthWatchHtml(): string {
       width:100%; display:grid; grid-template-columns:7px minmax(0,1fr) auto; gap:9px;
       text-align:left; padding:9px 0; border:0; border-bottom:1px dashed var(--hair);
       background:transparent; color:var(--ink); cursor:pointer; text-decoration:none;
+      font:inherit; align-items:start;
     }
+    .alert-notice {
+      display:none; margin-top:9px; padding:9px 11px; font-size:12px; line-height:1.45;
+      border:1px solid var(--hair); border-left:3px solid #BE2618; border-radius:4px;
+      background:var(--panel); color:var(--ink);
+    }
+    .alert-notice.on { display:block; }
+    .alert-notice a { color:var(--ink); }
     .signal:last-child { border-bottom:0; }
     .signal-bar { border-radius:4px; background:var(--signal); }
     .signal-name { display:block; font-weight:650; font-size:13px; line-height:1.3; }
@@ -1386,6 +1439,7 @@ export function earthWatchHtml(): string {
         <label class="tgl" for="dayNight"><input type="checkbox" id="dayNight" checked> Day &amp; night</label>
         <label class="tgl" for="antipodeLayer"><input type="checkbox" id="antipodeLayer"> Antipodes</label>
         <label class="tgl" for="cycloneLayer"><input type="checkbox" id="cycloneLayer"> Hurricane tracks</label>
+        <label class="tgl" for="tsunamiLayer"><input type="checkbox" id="tsunamiLayer"> Tsunami</label>
         <label class="tgl" for="autoSpin"><input type="checkbox" id="autoSpin" checked> Spin globe</label>
       </div>
     </div>
@@ -1407,6 +1461,15 @@ export function earthWatchHtml(): string {
         <span><i style="background:#8C1B12"></i>Cat 4</span>
         <span><i style="background:#7A4D91"></i>Cat 5</span>
       </div>
+    </div>
+
+    <div class="controls cyclone-controls" id="tsunamiControls" hidden>
+      <select id="tsunamiParts" class="field" aria-label="Tsunami layers">
+        <option value="all">Active warnings and recorded history</option>
+        <option value="live">Active warnings only</option>
+        <option value="history">Recorded history only</option>
+      </select>
+      <span class="cyclone-status" id="tsunamiStatus">Loading tsunami data&hellip;</span>
     </div>
 
     <section class="intro">
@@ -1457,6 +1520,7 @@ export function earthWatchHtml(): string {
             <span class="ring" style="--legend:#5B6B7C">Antipode</span>
             <span class="ring" style="--legend:#BE2618">Felt shaking</span>
           </div>
+          <div class="alert-notice" id="alertNotice"></div>
         </div>
       </div>
 
@@ -1528,7 +1592,10 @@ ${solarClientSource()}
       dayNight:true, antipodes:false, spin:true,
       feltEventId:null, feltSource:null, shakeMapCache:{}, sparkCache:{},
       cyclones:false, cycloneParts:"all", cycloneData:null,
-      cycloneFetchedAt:0, cycloneState:"idle", cycloneMissing:[]
+      cycloneFetchedAt:0, cycloneState:"idle", cycloneMissing:[],
+      tsunami:false, tsunamiParts:"all", tsunamiData:null,
+      tsunamiFetchedAt:0, tsunamiState:"idle",
+      userMovedMap:false, suppressMoveFlag:false
     };
     try {
       var storedSort = localStorage.getItem("earthWatch.signalSort");
@@ -1540,7 +1607,12 @@ ${solarClientSource()}
       earthquake:"#347FAC", weather:"#BE2618", natural:"#DE5F26",
       volcano:"#7A4D91", tsunami:"#246B82", space_weather:"#697B73"
     };
-    var map = L.map("map", { scrollWheelZoom:false, attributionControl:true }).setView([20,0], 2);
+    // scrollWheelZoom was off, which made the map feel locked: the wheel is how
+    // most people zoom, and with it disabled the only zoom controls were the +/-
+    // buttons. The usual argument for disabling it is scroll-jacking on a long
+    // page; the map here is a deliberate destination inside its own card and has a
+    // full-screen mode, so the trade goes the other way.
+    var map = L.map("map", { scrollWheelZoom:true, attributionControl:true }).setView([20,0], 2);
     var topo = L.tileLayer("https://basemap.nationalmap.gov/arcgis/rest/services/USGSTopo/MapServer/tile/{z}/{y}/{x}", {
       maxZoom:16, attribution:"USGS The National Map"
     });
@@ -1558,12 +1630,18 @@ ${solarClientSource()}
     // it has to be independently switchable rather than bundled into "storms".
     var cycloneConeLayer = L.layerGroup().addTo(map);
     var cycloneTrackLayer = L.layerGroup().addTo(map);
+    // Holds the forecast-zone polygons resolved for a non-spatial alert on demand.
+    var alertZoneLayer = L.layerGroup().addTo(map);
+    var tsunamiLiveLayer = L.layerGroup().addTo(map);
+    var tsunamiHistoryLayer = L.layerGroup().addTo(map);
     L.control.layers(
       {"Global clean map":clean, "USGS US topographic":topo},
       {
         "Aggregate signal heat":heatLayer, "Official events":eventLayer, "Target regions":regionLayer,
         "Day and night":terminatorLayer, "Antipodes":antipodeLayer, "Felt shaking":feltRingLayer,
-        "Cyclone forecast cone":cycloneConeLayer, "Cyclone track and positions":cycloneTrackLayer
+        "Cyclone forecast cone":cycloneConeLayer, "Cyclone track and positions":cycloneTrackLayer,
+        "Alert area":alertZoneLayer,
+        "Tsunami warnings (active)":tsunamiLiveLayer, "Tsunami history":tsunamiHistoryLayer
       },
       {collapsed:true}
     ).addTo(map);
@@ -2346,13 +2424,137 @@ ${solarClientSource()}
         return event.status !== "forecast" && occurredAt >= windowStart() && occurredAt <= Date.now();
       }));
       document.getElementById("contextCount").textContent = String(items.length);
+      // These rows used to be anchors straight to event.officialUrl. For an NWS
+      // alert that is the raw JSON API document, and this list is by definition the
+      // events with no geometry, so humanDestination() — which needs a point —
+      // always returned null for exactly the rows that most needed it. The fix is
+      // not a better link: it is to go and get the geometry the alert references.
       document.getElementById("contextSignals").innerHTML = items.length ? items.slice(0,8).map(function(event) {
         var color = colors[event.family] || "#697B73";
-        return '<a class="signal" href="' + esc(readableLink(event)) + '" target="_blank" rel="noopener">' +
+        return '<button type="button" class="signal" data-context-id="' + esc(event.id) + '">' +
           '<span class="signal-bar" style="--signal:' + color + '"></span>' +
           '<span><span class="signal-name">' + esc(event.title) + '</span><span class="signal-meta">' + esc(event.sourceLabel) + ' · ' + esc(relative(event.eventTime)) + ' · map ' + esc(mapContextLabel(event)) + ' · alert gate ' + esc(event.staleGateResult) + '</span></span>' +
-          '<span class="signal-score">' + esc(event.score) + '</span></a>';
+          '<span class="signal-score">' + esc(event.score) + '</span></button>';
       }).join("") : '<div class="empty">No non-spatial signal in this view.</div>';
+      Array.prototype.forEach.call(
+        document.getElementById("contextSignals").querySelectorAll("[data-context-id]"),
+        function(button) {
+          button.addEventListener("click", function() {
+            showNonSpatialOnMap(button.getAttribute("data-context-id"));
+          });
+        }
+      );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Putting a non-spatial alert on the map
+    //
+    // An NWS alert with geometry:null still says WHERE it applies — as a list of
+    // forecast-zone URLs. Resolving those gives real polygons, so "no geometry"
+    // turns out to mean "geometry one request away" rather than "unknown place".
+    // ─────────────────────────────────────────────────────────────────────────
+    function nonSpatialById(id) {
+      if (!state.data) return null;
+      var list = state.data.map.nonSpatialSignals || [];
+      for (var index = 0; index < list.length; index += 1) {
+        if (list[index].id === id) return list[index];
+      }
+      return null;
+    }
+
+    async function showNonSpatialOnMap(id) {
+      var event = nonSpatialById(id);
+      if (!event) return;
+      if (state.view !== "map") setView("map");
+      alertZoneLayer.clearLayers();
+
+      var detail = event.detail || {};
+      var zones = detail.zones || [];
+      if (!zones.length) {
+        // Nothing to draw. Say why, and hand over the best human page there is
+        // rather than silently doing nothing or dumping the reader into JSON.
+        showAlertNotice(event, "This alert names no forecast zone, so there is no boundary to draw for it. " +
+          "The agency describes its area only as text.");
+        return;
+      }
+
+      showAlertNotice(event, "Resolving " + zones.length + " forecast " +
+        (zones.length === 1 ? "zone" : "zones") + " from the National Weather Service...");
+
+      var results = await Promise.all(zones.map(function(url) {
+        return fetch(url, {headers:{accept:"application/geo+json"}})
+          .then(function(response) {
+            if (!response.ok) throw new Error("HTTP " + response.status);
+            return response.json();
+          })
+          .then(function(payload) { return payload && payload.geometry ? payload : null; })
+          .catch(function() { return null; });
+      }));
+
+      var drawn = 0;
+      var bounds = null;
+      results.forEach(function(zone) {
+        if (!zone || !zone.geometry) return;
+        var layer = L.geoJSON(zone, {
+          style:function() {
+            return {color:"#BE2618", weight:2, opacity:.95, fillColor:"#BE2618", fillOpacity:.12};
+          }
+        });
+        layer.bindPopup(alertPopup(event, zone));
+        layer.addTo(alertZoneLayer);
+        drawn += 1;
+        bounds = bounds ? bounds.extend(layer.getBounds()) : layer.getBounds();
+      });
+
+      if (!drawn || !bounds || !bounds.isValid()) {
+        // The zones were named but could not be fetched. That is a failed request,
+        // and it must not read as "this alert has no location".
+        showAlertNotice(event, "The National Weather Service did not return a boundary for " +
+          (zones.length === 1 ? "this zone" : "these zones") + ". The alert does have a location; " +
+          "this request for it failed.");
+        return;
+      }
+
+      if (!map.hasLayer(alertZoneLayer)) map.addLayer(alertZoneLayer);
+      map.fitBounds(bounds.pad(0.15));
+      var missing = zones.length - drawn;
+      showAlertNotice(event, "Showing " + drawn + " of " + zones.length + " forecast " +
+        (zones.length === 1 ? "zone" : "zones") + " for this alert." +
+        (missing > 0 ? " " + missing + " did not resolve." : ""));
+    }
+
+    function alertPopup(event, zone) {
+      var detail = event.detail || {};
+      var zoneName = zone && zone.properties && zone.properties.name;
+      var human = humanDestination(event);
+      var raw = safeUrl(event.officialUrl);
+      var links = "";
+      if (human) {
+        links += '<a class="popup-link" href="' + esc(safeUrl(human.url)) + '" target="_blank" rel="noopener">' +
+          esc(human.label) + "</a>";
+      }
+      if (raw !== "#") {
+        links += '<a class="popup-link secondary" href="' + esc(raw) + '" target="_blank" rel="noopener">' +
+          "Raw " + esc(event.sourceLabel) + " record (JSON)</a>";
+      }
+      return '<div class="popup-title">' + esc(event.title) + "</div>" +
+        (zoneName ? '<div class="popup-row"><strong>Zone:</strong> ' + esc(zoneName) + "</div>" : "") +
+        (detail.issuedBy ? '<div class="popup-row">Issued by ' + esc(detail.issuedBy) + "</div>" : "") +
+        (detail.headline ? '<div class="popup-row">' + esc(detail.headline) + "</div>" : "") +
+        (detail.instruction ? '<div class="popup-row"><strong>Instruction:</strong> ' + esc(detail.instruction) + "</div>" : "") +
+        '<div class="popup-note">This boundary is the forecast zone the alert names, not a measured ' +
+          "footprint of the hazard. The alert itself carried no geometry.</div>" +
+        (links ? '<div class="popup-actions">' + links + "</div>" : "");
+    }
+
+    function showAlertNotice(event, message) {
+      var element = document.getElementById("alertNotice");
+      if (!element) return;
+      var human = humanDestination(event);
+      element.innerHTML = '<strong>' + esc(event.title) + "</strong> &mdash; " + esc(message) +
+        (human ? ' <a href="' + esc(safeUrl(human.url)) + '" target="_blank" rel="noopener">' +
+          esc(human.label) + "</a>" : "");
+      element.classList.add("on");
     }
     function renderNotable() {
       var item = state.data.notableEvent;
@@ -2736,6 +2938,233 @@ ${solarClientSource()}
       return when.toISOString().replace("T"," ").slice(0,16) + " UTC";
     }
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // Tsunamis
+    //
+    // Two things that are not the same and must not look the same.
+    //
+    // ACTIVE warnings come from NWS and its warning-polygon service. They are
+    // empty almost every day, which is the honest answer and not a broken layer.
+    //
+    // RECORDED HISTORY comes from NCEI's global historical tsunami database. It is
+    // what makes this toggle worth having on an ordinary day — but every point is
+    // a SOURCE location, not a place that flooded, and its wave height is the
+    // largest runup measured anywhere along the affected coast, often hundreds of
+    // kilometres from the point being drawn. The popup has to say that, or the map
+    // invites a reader to think the marker is where the water was.
+    // ─────────────────────────────────────────────────────────────────────────
+    var TSUNAMI_HISTORY_URL = "https://www.ngdc.noaa.gov/hazel/hazard-service/api/v1/tsunamis/events?minYear=1900&minMaxWaterHeight=1";
+    var TSUNAMI_ALERT_TIERS = ["Tsunami Warning","Tsunami Advisory","Tsunami Watch"];
+    var TSUNAMI_WWA_URL = "https://mapservices.weather.noaa.gov/eventdriven/rest/services/WWA/watch_warn_adv/MapServer/0/query?where=phenom%3D%27TS%27&outFields=*&f=geojson";
+    var TSUNAMI_HISTORY_PAGES = 3;
+    var TSUNAMI_REFRESH_MS = 600000;
+
+    function tsunamiSeverity(heightMetres) {
+      if (heightMetres == null) return {color:"#697B73", label:"Wave height not reported"};
+      if (heightMetres < 2) return {color:"#69A88F", label:"Under 2 m"};
+      if (heightMetres < 5) return {color:"#D3921F", label:"2 to 5 m"};
+      if (heightMetres < 10) return {color:"#DE5F26", label:"5 to 10 m"};
+      if (heightMetres < 20) return {color:"#BE2618", label:"10 to 20 m"};
+      return {color:"#7A4D91", label:"Over 20 m"};
+    }
+
+    function tsunamiNumber(value) {
+      if (value == null || value === "") return null;
+      var parsed = Number(value);
+      return isFinite(parsed) ? parsed : null;
+    }
+
+    async function loadTsunami(force) {
+      var now = Date.now();
+      if (!force && state.tsunamiData && (now - state.tsunamiFetchedAt) < TSUNAMI_REFRESH_MS) {
+        renderTsunami();
+        return;
+      }
+      state.tsunamiState = "loading";
+      renderTsunamiStatus();
+
+      var historyRequests = [];
+      for (var page = 1; page <= TSUNAMI_HISTORY_PAGES; page += 1) {
+        historyRequests.push(TSUNAMI_HISTORY_URL + "&page=" + page);
+      }
+
+      var alertRequests = TSUNAMI_ALERT_TIERS.map(function(tier) {
+        return "https://api.weather.gov/alerts/active?event=" + encodeURIComponent(tier);
+      });
+
+      function getJson(url) {
+        return fetch(url)
+          .then(function(response) {
+            if (!response.ok) throw new Error("HTTP " + response.status);
+            return response.json();
+          })
+          .then(function(payload) {
+            if (payload && payload.error) throw new Error(payload.error.message || "service error");
+            return payload;
+          })
+          .catch(function() { return null; });
+      }
+
+      var settled = await Promise.all(
+        historyRequests.map(getJson)
+          .concat(alertRequests.map(getJson))
+          .concat([getJson(TSUNAMI_WWA_URL)])
+      );
+
+      var historyPayloads = settled.slice(0, historyRequests.length);
+      var alertPayloads = settled.slice(historyRequests.length, historyRequests.length + alertRequests.length);
+      var wwaPayload = settled[settled.length - 1];
+
+      var history = [];
+      var totalHistory = null;
+      var historyFailed = 0;
+      historyPayloads.forEach(function(payload) {
+        if (!payload) { historyFailed += 1; return; }
+        if (totalHistory == null && typeof payload.totalItems === "number") totalHistory = payload.totalItems;
+        (payload.items || []).forEach(function(item) { history.push(item); });
+      });
+
+      var alerts = [];
+      var alertsFailed = 0;
+      alertPayloads.forEach(function(payload) {
+        if (!payload) { alertsFailed += 1; return; }
+        (payload.features || []).forEach(function(feature) { alerts.push(feature); });
+      });
+
+      state.tsunamiData = {
+        history:history,
+        totalHistory:totalHistory,
+        historyFailed:historyFailed,
+        alerts:alerts,
+        alertsFailed:alertsFailed,
+        warningPolygons:wwaPayload && wwaPayload.features ? wwaPayload.features : null
+      };
+      state.tsunamiFetchedAt = Date.now();
+      // Only a total wipe-out is an error. A partial result still draws something
+      // real, and the status line says exactly how much of it is missing.
+      state.tsunamiState =
+        (historyFailed === historyRequests.length && alertsFailed === alertRequests.length)
+          ? "error" : "ready";
+      renderTsunami();
+    }
+
+    function renderTsunamiStatus() {
+      var element = document.getElementById("tsunamiStatus");
+      if (!element) return;
+      if (!state.tsunami) { element.textContent = ""; element.setAttribute("data-tone","normal"); return; }
+      if (state.tsunamiState === "loading") {
+        element.setAttribute("data-tone","normal");
+        element.textContent = "Loading tsunami warnings and the NCEI historical record...";
+        return;
+      }
+      if (state.tsunamiState === "error") {
+        element.setAttribute("data-tone","error");
+        element.textContent = "Tsunami data unavailable. This is a failed request, not an absence of tsunamis.";
+        return;
+      }
+      if (state.tsunamiState !== "ready") { element.textContent = ""; return; }
+      var data = state.tsunamiData || {};
+      var alertCount = (data.alerts || []).length;
+      var shown = (data.history || []).length;
+      var total = data.totalHistory;
+      var parts = [];
+      if (alertCount) {
+        element.setAttribute("data-tone","error");
+        parts.push(alertCount + " active tsunami " + (alertCount === 1 ? "alert" : "alerts") + " in force.");
+      } else {
+        element.setAttribute("data-tone","empty");
+        // The single most important sentence in this layer.
+        parts.push("No active tsunami warning, advisory or watch anywhere in the NWS system. The feed answered and it was empty.");
+      }
+      if (shown) {
+        // Never let a capped list read as the whole record.
+        parts.push("Showing " + shown + (total != null && total > shown ? " of " + total : "") +
+          " recorded tsunamis since 1900 that produced a wave of at least 1 m.");
+      }
+      if (data.historyFailed) parts.push(data.historyFailed + " history page(s) failed to load.");
+      if (data.alertsFailed) parts.push(data.alertsFailed + " alert feed(s) failed to load.");
+      element.textContent = parts.join(" ");
+    }
+
+    function renderTsunami() {
+      tsunamiLiveLayer.clearLayers();
+      tsunamiHistoryLayer.clearLayers();
+      renderTsunamiStatus();
+      if (!state.tsunami || !state.tsunamiData) return;
+      var data = state.tsunamiData;
+      var parts = state.tsunamiParts;
+      var showLive = parts === "all" || parts === "live";
+      var showHistory = parts === "all" || parts === "history";
+
+      if (showLive) {
+        (data.warningPolygons || []).forEach(function(feature) {
+          if (!feature || !feature.geometry) return;
+          L.geoJSON(feature, {
+            style:function() { return {color:"#7A1810", weight:2, opacity:.95, fillColor:"#BE2618", fillOpacity:.2}; }
+          }).bindPopup(
+            '<div class="popup-title">' + esc((feature.properties && feature.properties.event) || "Tsunami warning") + "</div>" +
+            '<div class="popup-row">Issued by ' + esc((feature.properties && feature.properties.wfo) || "the National Weather Service") + "</div>" +
+            '<div class="popup-note">An active warning polygon from the National Weather Service. ' +
+              "Follow your local emergency management and the issuing agency, not this map.</div>"
+          ).addTo(tsunamiLiveLayer);
+        });
+
+        (data.alerts || []).forEach(function(feature) {
+          if (!feature || !feature.geometry) return;
+          var properties = feature.properties || {};
+          L.geoJSON(feature, {
+            style:function() { return {color:"#7A1810", weight:2, opacity:.95, fillColor:"#BE2618", fillOpacity:.2}; }
+          }).bindPopup(
+            '<div class="popup-title">' + esc(properties.event || "Tsunami alert") + "</div>" +
+            '<div class="popup-row">' + esc(properties.areaDesc || "Area not reported") + "</div>" +
+            (properties.headline ? '<div class="popup-row">' + esc(properties.headline) + "</div>" : "") +
+            '<div class="popup-note">Active National Weather Service alert.</div>'
+          ).addTo(tsunamiLiveLayer);
+        });
+      }
+
+      if (showHistory) {
+        (data.history || []).forEach(function(item) {
+          var lat = tsunamiNumber(item.latitude);
+          var lon = tsunamiNumber(item.longitude);
+          if (lat == null || lon == null) return;
+          if (lat < -90 || lat > 90 || lon < -180 || lon > 180) return;
+          var height = tsunamiNumber(item.maxWaterHeight);
+          var severity = tsunamiSeverity(height);
+          var radius = height == null ? 3 : Math.max(3, Math.min(14, 3 + Math.sqrt(height) * 2));
+          L.circleMarker([lat, lon], {
+            radius:radius, color:severity.color, weight:1.5,
+            fillColor:severity.color, fillOpacity:.45
+          }).bindPopup(tsunamiHistoryPopup(item, height, severity)).addTo(tsunamiHistoryLayer);
+        });
+      }
+    }
+
+    function tsunamiHistoryPopup(item, height, severity) {
+      var when = [item.year, item.month, item.day].filter(function(part) { return part != null; }).join("-");
+      var deaths = tsunamiNumber(item.deathsTotal);
+      var magnitude = tsunamiNumber(item.eqMagnitude);
+      var runups = tsunamiNumber(item.numRunups);
+      return '<div class="popup-title">' + esc(item.locationName || item.country || "Tsunami") + "</div>" +
+        '<div class="popup-row"><strong>' + esc(when || "Date not reported") + "</strong>" +
+          (item.country ? " &middot; " + esc(item.country) : "") + "</div>" +
+        '<div class="popup-row">Largest wave measured: <strong>' +
+          (height == null ? "not reported" : esc(height) + " m") + "</strong>" +
+          (height == null ? "" : " (" + esc(severity.label) + ")") + "</div>" +
+        '<div class="popup-row">Triggering earthquake: ' +
+          (magnitude == null ? "not reported" : "M " + esc(magnitude)) + "</div>" +
+        '<div class="popup-row">Deaths recorded: ' +
+          (deaths == null ? "not reported in this record" : esc(formatNumber(deaths))) + "</div>" +
+        '<div class="popup-row">Shoreline measurements in the record: ' +
+          (runups == null ? "not reported" : esc(formatNumber(runups))) + "</div>" +
+        '<div class="popup-note"><strong>This marker is the source, not the flooding.</strong> It sits at ' +
+          "the earthquake or landslide that generated the wave. The height above is the largest runup " +
+          "measured anywhere along the affected coast, which can be many hundreds of kilometres away " +
+          "from this point.</div>" +
+        '<div class="popup-note">NOAA NCEI Global Historical Tsunami Database. A blank field means the ' +
+          "record does not carry that value, which is not the same as a zero.</div>";
+    }
+
     // The globe lives in a module script (it imports three.js) and publishes itself
     // on window.EarthGlobe when ready. Every call here is guarded: if WebGL is
     // unavailable or three.js fails to load, the flat map keeps working untouched.
@@ -2772,9 +3201,19 @@ ${solarClientSource()}
       if (view === "map") setTimeout(function(){ map.invalidateSize(); }, 40);
       else pushGlobe(state.data ? selectedEvents() : []);
     }
-    function applyDefaultFocus() {
+    // Never take the map back from a reader who has moved it.
+    //
+    // state.focusApplied alone was not enough, because it is only set on load()'s
+    // SUCCESS path. A failed first fetch — a cold start, a blip — left it false, so
+    // the five-minute poll would re-apply the default focus minutes later and yank
+    // the view away from wherever the reader had deliberately panned to. The guard
+    // that matters is not "have we focused yet" but "has a person touched this".
+    function applyDefaultFocus(force) {
       if (!state.data || !state.data.map.focus) return;
+      if (state.userMovedMap && force !== true) return;
+      state.suppressMoveFlag = true;
       map.setView(state.data.map.focus.center,state.data.map.focus.zoom);
+      setTimeout(function(){ state.suppressMoveFlag = false; },0);
     }
     async function load() {
       try {
@@ -2840,6 +3279,20 @@ ${solarClientSource()}
       state.cycloneParts = event.target.value;
       renderCyclones();
     });
+    document.getElementById("tsunamiLayer").addEventListener("change",function(event) {
+      state.tsunami = event.target.checked;
+      document.getElementById("tsunamiControls").hidden = !state.tsunami;
+      if (state.tsunami) loadTsunami(false);
+      else renderTsunami();
+    });
+    document.getElementById("tsunamiParts").addEventListener("change",function(event) {
+      state.tsunamiParts = event.target.value;
+      renderTsunami();
+    });
+    // Any movement the page did not initiate means a person is driving the map.
+    map.on("movestart zoomstart",function() {
+      if (!state.suppressMoveFlag) state.userMovedMap = true;
+    });
     document.getElementById("autoSpin").addEventListener("change",function(event) {
       state.spin = event.target.checked;
       syncGlobeSettings();
@@ -2885,7 +3338,11 @@ ${solarClientSource()}
       loadSparkline(event);
     });
 
-    document.getElementById("resetFocus").addEventListener("click",applyDefaultFocus);
+    // Explicitly asking for the default view is the one case that overrides the
+    // "do not move a map the reader is driving" rule.
+    document.getElementById("resetFocus").addEventListener("click",function() {
+      applyDefaultFocus(true);
+    });
     document.getElementById("locate").addEventListener("click",function() {
       if (!navigator.geolocation) return;
       navigator.geolocation.getCurrentPosition(function(position) {

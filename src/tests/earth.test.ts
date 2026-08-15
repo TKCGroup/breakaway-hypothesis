@@ -602,6 +602,61 @@ describe("Earth Watch event detail", () => {
     )!;
   }
 
+  it("carries the alert's forecast zones so a non-spatial alert can still be mapped", () => {
+    // The whole point of the non-spatial list is that these events have no
+    // geometry. They are not, however, placeless: NWS names the zones, and the
+    // zone endpoint has the polygon. Without this field the page had nothing to
+    // offer but a link to the raw JSON API document.
+    const detail = alertEvent({
+      ...NWS_ALERT_PROPERTIES,
+      areaDesc: "Alenuihaha Channel; Big Island Windward Waters",
+      affectedZones: [
+        "https://api.weather.gov/zones/forecast/PHZ121",
+        "https://api.weather.gov/zones/forecast/PHZ122"
+      ]
+    }).detail!;
+    expect(detail.zones).toEqual([
+      "https://api.weather.gov/zones/forecast/PHZ121",
+      "https://api.weather.gov/zones/forecast/PHZ122"
+    ]);
+    expect(detail.areaDesc).toContain("Big Island Windward Waters");
+  });
+
+  it("refuses a zone URL that is not https api.weather.gov", () => {
+    // The browser fetches whatever lands in this array, so it is a trust boundary.
+    // affectedZones arrives from a third-party feed; one poisoned entry would
+    // otherwise become an outbound request from a reader's browser.
+    const detail = alertEvent({
+      ...NWS_ALERT_PROPERTIES,
+      affectedZones: [
+        "https://evil.example.com/zones/forecast/PHZ121",
+        "http://api.weather.gov/zones/forecast/PHZ122",
+        "javascript:alert(1)",
+        "not a url at all",
+        42,
+        "https://api.weather.gov/zones/forecast/PHZ123"
+      ]
+    }).detail!;
+    expect(detail.zones).toEqual(["https://api.weather.gov/zones/forecast/PHZ123"]);
+  });
+
+  it("bounds how many zone requests one click can fire", () => {
+    // A regional alert can name dozens of zones; each one is a browser request.
+    const detail = alertEvent({
+      ...NWS_ALERT_PROPERTIES,
+      affectedZones: Array.from(
+        { length: 30 },
+        (_unused, index) => `https://api.weather.gov/zones/forecast/PHZ${index}`
+      )
+    }).detail!;
+    expect(detail.zones).toHaveLength(6);
+  });
+
+  it("omits zones entirely when the alert names none, rather than emitting an empty list", () => {
+    const detail = alertEvent(NWS_ALERT_PROPERTIES).detail!;
+    expect(detail.zones).toBeUndefined();
+  });
+
   it("lifts the agency's own words out of the stored alert", () => {
     const detail = alertEvent(NWS_ALERT_PROPERTIES).detail!;
     expect(detail.headline).toContain("Flood Watch issued August 14");
