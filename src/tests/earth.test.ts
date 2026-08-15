@@ -489,3 +489,140 @@ function emptySnapshot(): DashboardSnapshot {
     baselines: []
   };
 }
+
+/**
+ * Verbatim `properties` from the live USGS all_week feed on 2026-08-14, kept whole
+ * rather than trimmed to the fields under test. A fixture that carries only the keys
+ * the code reads encodes an assumption about the payload instead of its shape, which
+ * is how green tests ship real bugs.
+ */
+const USGS_FELT_PROPERTIES = {
+  mag: 5.9,
+  place: "36 km NE of Labuan Bajo, Indonesia",
+  time: 1786745630869,
+  updated: 1786753365423,
+  tz: null,
+  url: "https://earthquake.usgs.gov/earthquakes/eventpage/us6000tkta",
+  detail: "https://earthquake.usgs.gov/earthquakes/feed/v1.0/detail/us6000tkta.geojson",
+  felt: 1,
+  cdi: 3.4,
+  mmi: 6.722,
+  alert: "green",
+  status: "reviewed",
+  tsunami: 0,
+  sig: 536,
+  net: "us",
+  code: "6000tkta",
+  ids: ",us6000tkta,",
+  sources: ",us,",
+  types: ",dyfi,ground-failure,losspager,origin,phase-data,shakemap,",
+  nst: 72,
+  dmin: 3.273,
+  rms: 1.65,
+  gap: 36,
+  magType: "mb",
+  type: "earthquake",
+  title: "M 5.9 - 36 km NE of Labuan Bajo, Indonesia"
+};
+
+/** Same source, same day — the far more common case where USGS reports nulls. */
+const USGS_UNREPORTED_PROPERTIES = {
+  ...USGS_FELT_PROPERTIES,
+  mag: 2,
+  place: "6 km E of Clam Gulch, Alaska",
+  url: "https://earthquake.usgs.gov/earthquakes/eventpage/aka2026qbplzh",
+  felt: null,
+  cdi: null,
+  mmi: null,
+  alert: null,
+  status: "automatic",
+  sig: 62,
+  net: "ak",
+  code: "a2026qbplzh",
+  ids: ",aka2026qbplzh,",
+  sources: ",ak,",
+  types: ",origin,phase-data,",
+  magType: "ml",
+  title: "M 2.0 - 6 km E of Clam Gulch, Alaska"
+};
+
+describe("Earth Watch shaking, antipodes, and felt rings", () => {
+  function quakeWith(rawProperties: unknown, overrides = {}) {
+    const snapshot = emptySnapshot();
+    snapshot.events = [
+      eventFixture({
+        id: "quake",
+        externalId: "us6000tkta",
+        magnitude: 5.9,
+        depthKm: 10,
+        rawJson: { properties: rawProperties },
+        ...overrides
+      })
+    ];
+    return buildEarthWatchData(snapshot, DEFAULT_CONFIG, NOW).map.events.find(
+      (event) => event.id === "quake"
+    )!;
+  }
+
+  it("lifts the observed shaking fields out of the stored USGS payload", () => {
+    const event = quakeWith(USGS_FELT_PROPERTIES);
+    expect(event.shaking).toMatchObject({
+      feltReports: 1,
+      reportedIntensity: 3.4,
+      instrumentalIntensity: 6.722,
+      pagerAlert: "green",
+      usgsEventId: "us6000tkta",
+      hasShakeMap: true
+    });
+  });
+
+  it("leaves unreported shaking undefined instead of manufacturing a zero", () => {
+    // This is the whole reason `reportedNumber` exists. `Number(null)` is 0, and USGS
+    // sends null on roughly 95% of a week's events, so the naive read would publish
+    // "0 people felt this" as though it were a measurement.
+    const event = quakeWith(USGS_UNREPORTED_PROPERTIES);
+    expect(event.shaking!.feltReports).toBeUndefined();
+    expect(event.shaking!.reportedIntensity).toBeUndefined();
+    expect(event.shaking!.instrumentalIntensity).toBeUndefined();
+    expect(event.shaking!.pagerAlert).toBeUndefined();
+  });
+
+  it("reports no ShakeMap when USGS has not published one", () => {
+    expect(quakeWith(USGS_UNREPORTED_PROPERTIES).shaking!.hasShakeMap).toBe(false);
+  });
+
+  it("survives a payload with no properties at all", () => {
+    const event = quakeWith(undefined);
+    expect(event.shaking).toBeUndefined();
+    expect(event.feltRings!.length).toBeGreaterThan(0);
+  });
+
+  it("carries the antipode of the epicentre", () => {
+    const event = quakeWith(USGS_FELT_PROPERTIES);
+    // eventFixture sits at 46.84N 121.76W, whose antipode is 46.84S 58.24E.
+    expect(event.antipode![0]).toBeCloseTo(-46.84, 6);
+    expect(event.antipode![1]).toBeCloseTo(58.24, 6);
+  });
+
+  it("gives earthquakes modeled rings and gives other hazards none", () => {
+    expect(quakeWith(USGS_FELT_PROPERTIES).feltRings!.length).toBeGreaterThan(0);
+
+    const snapshot = emptySnapshot();
+    snapshot.events = [
+      eventFixture({
+        id: "weather",
+        source: "nws_alerts",
+        externalId: "weather",
+        eventType: "weather_alert",
+        title: "Tornado Warning: Test County",
+        magnitude: undefined,
+        region: undefined
+      })
+    ];
+    const alert = buildEarthWatchData(snapshot, DEFAULT_CONFIG, NOW).map.events.find(
+      (event) => event.id === "weather"
+    )!;
+    expect(alert.feltRings).toBeUndefined();
+    expect(alert.shaking).toBeUndefined();
+  });
+});

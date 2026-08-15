@@ -8,6 +8,13 @@ import {
   type DashboardData,
   type DashboardSnapshot
 } from "./dashboard.js";
+import {
+  antipode,
+  feltRings,
+  type FeltRing,
+  MODEL_MAX_DISTANCE_KM
+} from "./logic/feltRadius.js";
+import { solarClientSource } from "./logic/solar.js";
 import { evaluateStaleGate } from "./logic/staleGate.js";
 import type {
   CascadeStage,
@@ -61,6 +68,32 @@ export interface EarthMapEvent {
   staleGateResult: "passed" | "blocked";
   staleGateReasons: string[];
   mapContext: EarthMapContext;
+  /** Point on the opposite side of the planet, present whenever the event is a point. */
+  antipode?: [number, number];
+  /** Observed shaking, straight from the official record. Absent means not reported. */
+  shaking?: EarthShakingReport;
+  /** Modeled perceptibility rings. Only for earthquakes with a magnitude. */
+  feltRings?: FeltRing[];
+}
+
+/**
+ * What the issuing agency actually observed, as distinct from what the model predicts.
+ * Every field is optional because USGS genuinely omits them: only about 5% of events
+ * in a given week carry any "Did You Feel It" response at all.
+ */
+export interface EarthShakingReport {
+  /** Number of "Did You Feel It" responses received. */
+  feltReports?: number;
+  /** Community Decimal Intensity — the maximum intensity people reported. */
+  reportedIntensity?: number;
+  /** Maximum instrumental intensity from ShakeMap. */
+  instrumentalIntensity?: number;
+  /** PAGER alert level, when USGS has issued one. */
+  pagerAlert?: string;
+  /** USGS event id, which is what addresses the ShakeMap contour product. */
+  usgsEventId?: string;
+  /** True when USGS lists a shakemap product, so official contours can be fetched. */
+  hasShakeMap: boolean;
 }
 
 export interface EarthMapFocus {
@@ -387,8 +420,50 @@ function earthMapEvent(
     staleGatePassed: staleGate.passed,
     staleGateResult: staleGate.passed ? "passed" : "blocked",
     staleGateReasons: staleGate.reasons,
-    mapContext
+    mapContext,
+    antipode: antipodeOf(event),
+    shaking: shakingReport(event),
+    feltRings:
+      family === "earthquake" && Number.isFinite(event.magnitude)
+        ? feltRings(event.magnitude, event.depthKm)
+        : undefined
   };
+}
+
+function antipodeOf(event: NormalizedEvent): [number, number] | undefined {
+  if (!validMapPoint(event.lat ?? Number.NaN, event.lon ?? Number.NaN)) return undefined;
+  return antipode(event.lat as number, event.lon as number);
+}
+
+/**
+ * Pull the observed-shaking fields out of the stored USGS payload.
+ *
+ * These ride along in `rawJson` because the normaliser only lifts the fields the
+ * watcher itself needs. Nothing here is required and nothing is defaulted: a missing
+ * `felt` means USGS received no reports, which is not the same as zero people feeling
+ * it, and a fabricated 0 would read as a measurement.
+ */
+function shakingReport(event: NormalizedEvent): EarthShakingReport | undefined {
+  if (event.eventType !== "earthquake") return undefined;
+  const properties = asObject(asObject(event.rawJson).properties);
+  if (!Object.keys(properties).length) return undefined;
+
+  const types = typeof properties.types === "string" ? properties.types : "";
+  const report: EarthShakingReport = {
+    feltReports: reportedNumber(properties.felt),
+    reportedIntensity: reportedNumber(properties.cdi),
+    instrumentalIntensity: reportedNumber(properties.mmi),
+    pagerAlert: typeof properties.alert === "string" ? properties.alert : undefined,
+    // `externalId` is the USGS feature id (net + code, e.g. "us6000tkt2"), which is
+    // exactly what the FDSN event query and the ShakeMap product path address.
+    usgsEventId: event.externalId,
+    hasShakeMap: types.includes("shakemap")
+  };
+  // Returned even when every field is empty. "We read the official record and it
+  // reports no shaking" is a real state and a useful one; collapsing it into the
+  // same undefined that means "this hazard has no shaking concept at all" would
+  // overload one null across two different answers.
+  return report;
 }
 
 export function earthquakeMapContextWindowHours(
@@ -700,6 +775,20 @@ function numberValue(value: unknown): number | undefined {
   return Number.isFinite(number) ? number : undefined;
 }
 
+/**
+ * Like `numberValue`, but treats "the agency reported nothing" as undefined instead
+ * of zero.
+ *
+ * `Number(null)` is 0, and USGS sends `felt: null` on roughly 95% of events in a
+ * given week. Routing those through `numberValue` would publish "0 people felt this"
+ * — a fabricated measurement that reads exactly like a real one and that no test of
+ * the surrounding code would catch.
+ */
+function reportedNumber(value: unknown): number | undefined {
+  if (value === null || value === undefined || value === "") return undefined;
+  return numberValue(value);
+}
+
 function hoursSince(then: Date, now: Date): number {
   return (now.getTime() - then.getTime()) / 3_600_000;
 }
@@ -983,6 +1072,53 @@ export function earthWatchHtml(): string {
     .maphint { font-size:11.5px; color:var(--muted); padding:8px 12px; border-top:1px solid var(--hair); }
     .legend { display:flex; gap:10px; flex-wrap:wrap; margin-top:6px; }
     .legend span::before { content:""; display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:5px; background:var(--legend); }
+    .legend span.ring::before { border-radius:0; width:9px; height:9px; background:transparent; border:1.5px dashed var(--legend); }
+
+    .stage { position:relative; }
+    .stage[data-stage="globe"] #map { display:none; }
+    .stage[data-stage="map"] .globe-wrap { display:none; }
+    .globe-wrap { position:relative; height:610px; width:100%; background:#05070D; }
+    #globe { display:block; width:100%; height:100%; touch-action:none; cursor:grab; }
+    #globe:active { cursor:grabbing; }
+    .globe-status {
+      position:absolute; left:12px; bottom:12px; z-index:5; pointer-events:none;
+      font-family:"IBM Plex Mono",monospace; font-size:10.5px; letter-spacing:.03em;
+      color:#C6D4E4; background:rgba(5,7,13,.68); border:1px solid rgba(198,212,228,.22);
+      border-radius:3px; padding:5px 8px; max-width:min(420px,72%); line-height:1.5;
+    }
+    .globe-clock {
+      position:absolute; right:12px; top:12px; z-index:5; pointer-events:none;
+      font-family:"IBM Plex Mono",monospace; font-size:10.5px; color:#C6D4E4;
+      background:rgba(5,7,13,.68); border:1px solid rgba(198,212,228,.22);
+      border-radius:3px; padding:5px 8px; text-align:right; line-height:1.6;
+      white-space:pre-line;
+    }
+    .globe-tools { position:absolute; left:12px; top:12px; z-index:5; display:flex; gap:6px; }
+    .globe-tools button {
+      font-family:"IBM Plex Mono",monospace; font-size:10.5px; letter-spacing:.03em;
+      color:#C6D4E4; background:rgba(5,7,13,.72); border:1px solid rgba(198,212,228,.28);
+      border-radius:3px; padding:5px 8px; cursor:pointer;
+    }
+    .globe-tools button[aria-pressed="true"] { background:#C6D4E4; color:#05070D; }
+
+    .toggles { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+    .tgl {
+      display:inline-flex; align-items:center; gap:5px; font-size:11.5px; color:var(--muted);
+      border:1px solid var(--hair); border-radius:4px; padding:6px 9px; background:var(--panel); cursor:pointer;
+    }
+    .tgl input { margin:0; accent-color:var(--ink); }
+    .tgl:has(input:checked) { color:var(--ink); border-color:var(--ink); font-weight:600; }
+
+    .popup-actions { display:flex; gap:6px; flex-wrap:wrap; margin-top:9px; }
+    .popup-actions button {
+      font-family:inherit; font-size:11px; font-weight:650; color:var(--ink); cursor:pointer;
+      background:var(--paper); border:1px solid var(--ink); border-radius:3px; padding:5px 8px;
+    }
+    .popup-actions button:disabled { opacity:.55; cursor:progress; }
+    .popup-note { font-size:10.5px; color:var(--muted); margin-top:7px; line-height:1.45; }
+    .popup-note.official { color:#2F7D57; font-weight:600; }
+    .shake-scale { display:flex; gap:2px; margin-top:7px; }
+    .shake-scale i { flex:1; height:6px; font-style:normal; }
     .sidebar { display:grid; align-content:start; }
     .sec { padding:14px 15px; border-bottom:1px solid var(--hair); }
     .sec:last-child { border-bottom:0; }
@@ -1045,11 +1181,13 @@ export function earthWatchHtml(): string {
     body.map-fs { overflow:hidden; }
     .map-card.fs { position:fixed; inset:0; z-index:2000; border:0; border-radius:0; }
     .map-card.fs #map { height:100vh; height:100dvh; }
+    .map-card.fs .globe-wrap { height:100vh; height:100dvh; }
     .map-card.fs .maphint { display:none; }
     .fs-btn { font-size:17px; font-weight:700; color:var(--ink); text-decoration:none; cursor:pointer; }
     @media (max-width:920px) {
       .main-grid { grid-template-columns:1fr; }
       #map { height:460px; }
+      .globe-wrap { height:460px; }
     }
     @media (max-width:680px) {
       .wrap { padding:15px 12px 42px; }
@@ -1067,6 +1205,8 @@ export function earthWatchHtml(): string {
       .banner { grid-template-columns:1fr; gap:8px; }
       .metrics { grid-template-columns:repeat(2,minmax(0,1fr)); }
       #map { height:390px; }
+      .globe-wrap { height:390px; }
+      .globe-clock { display:none; }
       .metric { min-height:79px; }
     }
     @media (prefers-reduced-motion:no-preference) {
@@ -1125,6 +1265,18 @@ export function earthWatchHtml(): string {
       </div>
     </div>
 
+    <div class="controls" style="margin-top:10px">
+      <div class="segmented" aria-label="Map projection">
+        <button type="button" class="active" data-view="map">Flat map</button>
+        <button type="button" data-view="globe">3D globe</button>
+      </div>
+      <div class="toggles">
+        <label class="tgl" for="dayNight"><input type="checkbox" id="dayNight" checked> Day &amp; night</label>
+        <label class="tgl" for="antipodeLayer"><input type="checkbox" id="antipodeLayer"> Antipodes</label>
+        <label class="tgl" for="autoSpin"><input type="checkbox" id="autoSpin" checked> Spin globe</label>
+      </div>
+    </div>
+
     <section class="intro">
       <p>Use the map to inspect eligible official events, target-region stages, and broader natural-hazard context. The heat layer represents <strong>official signal load</strong>, not the probability of a disaster.</p>
       <p class="disc"><strong>Not a prediction or emergency-warning service.</strong> Earthquakes cannot be predicted by this page. For immediate instructions, follow the linked issuing agency and local emergency management.</p>
@@ -1149,16 +1301,29 @@ export function earthWatchHtml(): string {
 
     <div class="main-grid">
       <div class="card map-card" id="mapCard">
-        <div id="map" role="application" aria-label="Official geohazard map with earthquakes, severe-weather polygons, natural events, aggregate signal heat, and configured target regions"></div>
+        <div class="stage" id="stage" data-stage="map">
+          <div id="map" role="application" aria-label="Official geohazard map with earthquakes, severe-weather polygons, natural events, aggregate signal heat, configured target regions, and a solar day and night overlay"></div>
+          <div class="globe-wrap">
+            <canvas id="globe" role="img" aria-label="Rotatable globe showing official geohazard events and the current solar day and night terminator"></canvas>
+            <div class="globe-tools">
+              <button type="button" id="globeReset">Recentre</button>
+              <button type="button" id="globeFollow" aria-pressed="false">Follow top signal</button>
+            </div>
+            <div class="globe-clock" id="globeClock"></div>
+            <div class="globe-status" id="globeStatus">Loading NASA Blue Marble imagery...</div>
+          </div>
+        </div>
         <div class="maphint">
           <strong id="mapFocus">Finding the strongest eligible official activity...</strong>
-          Select a marker or polygon for official timestamps, notification-gate status, and map-context eligibility. Use the map layer control to separate heat, events, and configured regions.
+          Select a marker or polygon for official timestamps, notification-gate status, and map-context eligibility. Earthquakes also offer their antipode and a felt-shaking extent. Use the map layer control to separate heat, events, and configured regions.
           <div class="legend">
             <span style="--legend:#347FAC">Earthquake</span>
             <span style="--legend:#BE2618">Severe weather</span>
             <span style="--legend:#DE5F26">Natural event</span>
             <span style="--legend:#7A4D91">Volcano</span>
             <span style="--legend:#2F7D57">Target region</span>
+            <span class="ring" style="--legend:#5B6B7C">Antipode</span>
+            <span class="ring" style="--legend:#BE2618">Felt shaking</span>
           </div>
         </div>
       </div>
@@ -1203,9 +1368,34 @@ export function earthWatchHtml(): string {
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
   <script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js" integrity="sha384-mFKkGiGvT5vo1fEyGCD3hshDdKmW3wzXW/x+fWriYJArD0R3gawT6lMvLboM22c0" crossorigin=""></script>
   <script>
+  // Solar geometry, serialised from src/logic/solar.ts so the page and the vitest
+  // suite run byte-identical code. Emitted once and shared by both the flat map
+  // (classic script, below) and the globe (module script, further down).
+  window.__earthSolar = (function() {
+    "use strict";
+${solarClientSource()}
+    return {
+      subsolarPoint: subsolarPoint,
+      solarElevationDeg: solarElevationDeg,
+      nightFraction: nightFraction,
+      twilightBand: twilightBand,
+      localSolarHour: localSolarHour,
+      solarPhaseLabel: solarPhaseLabel,
+      geoToVector: geoToVector,
+      TWILIGHT_BANDS: TWILIGHT_BANDS
+    };
+  })();
+  </script>
+  <script>
   (function() {
     "use strict";
-    var state = { data:null, window:"now", hazard:"all", source:"all", sort:"score", layerById:{}, focusApplied:false };
+    var solar = window.__earthSolar;
+    var state = {
+      data:null, window:"now", hazard:"all", source:"all", sort:"score",
+      layerById:{}, focusApplied:false, view:"map",
+      dayNight:true, antipodes:false, spin:true,
+      feltEventId:null, feltSource:null, shakeMapCache:{}
+    };
     try {
       var storedSort = localStorage.getItem("earthWatch.signalSort");
       if (storedSort === "score" || storedSort === "lastActive" || storedSort === "magnitude") {
@@ -1226,9 +1416,15 @@ export function earthWatchHtml(): string {
     var heatLayer = L.layerGroup().addTo(map);
     var eventLayer = L.layerGroup().addTo(map);
     var regionLayer = L.layerGroup().addTo(map);
+    var terminatorLayer = L.layerGroup().addTo(map);
+    var antipodeLayer = L.layerGroup().addTo(map);
+    var feltRingLayer = L.layerGroup().addTo(map);
     L.control.layers(
       {"Global clean map":clean, "USGS US topographic":topo},
-      {"Aggregate signal heat":heatLayer, "Official events":eventLayer, "Target regions":regionLayer},
+      {
+        "Aggregate signal heat":heatLayer, "Official events":eventLayer, "Target regions":regionLayer,
+        "Day and night":terminatorLayer, "Antipodes":antipodeLayer, "Felt shaking":feltRingLayer
+      },
       {collapsed:true}
     ).addTo(map);
 
@@ -1332,7 +1528,65 @@ export function earthWatchHtml(): string {
         '<div class="popup-row"><strong>Notification stale gate:</strong> ' + esc(event.staleGateResult) + '</div>' +
         (event.staleGateReasons.length ? '<div class="popup-row"><strong>Notification blocked by:</strong> ' + esc(event.staleGateReasons.join(", ")) + '</div>' : '') +
         '<div class="popup-row"><strong>Map context:</strong> ' + esc(mapContextLabel(event)) + '</div>' +
-        '<a class="popup-link" href="' + esc(safeUrl(event.officialUrl)) + '" target="_blank" rel="noopener">Open official record</a>';
+        shakingRows(event) +
+        '<a class="popup-link" href="' + esc(safeUrl(event.officialUrl)) + '" target="_blank" rel="noopener">Open official record</a>' +
+        quakeActions(event);
+    }
+
+    function shakingRows(event) {
+      var shaking = event.shaking;
+      if (!shaking) return "";
+      var rows = "";
+      // Absent is not zero. USGS sends no "felt" value at all on most events, and
+      // saying "0 people reported feeling it" would be a claim we cannot make.
+      if (shaking.feltReports !== undefined) {
+        rows += '<div class="popup-row"><strong>Felt reports:</strong> ' + esc(shaking.feltReports) +
+          ' submitted to USGS &ldquo;Did You Feel It?&rdquo;</div>';
+      }
+      if (shaking.reportedIntensity !== undefined) {
+        rows += '<div class="popup-row"><strong>Strongest reported shaking:</strong> ' +
+          esc(intensityLabel(shaking.reportedIntensity)) + ' (' + esc(shaking.reportedIntensity) + ')</div>';
+      }
+      if (shaking.instrumentalIntensity !== undefined) {
+        rows += '<div class="popup-row"><strong>Strongest instrumental shaking:</strong> ' +
+          esc(intensityLabel(shaking.instrumentalIntensity)) + ' (' + esc(shaking.instrumentalIntensity) + ')</div>';
+      }
+      if (shaking.pagerAlert) {
+        rows += '<div class="popup-row"><strong>USGS PAGER alert:</strong> ' + esc(shaking.pagerAlert) + '</div>';
+      }
+      if (!rows && event.family === "earthquake") {
+        rows = '<div class="popup-row"><strong>Felt reports:</strong> none received by USGS</div>';
+      }
+      return rows;
+    }
+
+    function quakeActions(event) {
+      if (event.family !== "earthquake") return "";
+      var buttons = "";
+      if (event.antipode) {
+        buttons += '<button type="button" data-earth-action="antipode" data-earth-id="' +
+          esc(event.id) + '">Go to antipode</button>';
+      }
+      if ((event.feltRings && event.feltRings.length) || (event.shaking && event.shaking.hasShakeMap)) {
+        buttons += '<button type="button" data-earth-action="felt" data-earth-id="' + esc(event.id) + '"' +
+          (state.feltSource === "loading" && state.feltEventId === event.id ? " disabled" : "") +
+          '>' + esc(feltButtonLabel(event)) + '</button>';
+      }
+      if (!buttons) return "";
+      var note = "";
+      if (state.feltEventId === event.id) {
+        if (state.feltSource === "official") {
+          note = '<div class="popup-note official">Showing official USGS ShakeMap contours.</div>';
+        } else if (state.feltSource === "loading") {
+          note = '<div class="popup-note">Checking USGS for a published ShakeMap...</div>';
+        } else {
+          var cached = state.shakeMapCache[event.id];
+          note = '<div class="popup-note">Showing a modeled point-source estimate' +
+            (cached && cached.reason ? ' — no official ShakeMap available (' + esc(cached.reason) + ')' : '') +
+            '. Large ruptures are felt farther along strike than these circles show.</div>';
+        }
+      }
+      return '<div class="popup-actions">' + buttons + '</div>' + note;
     }
     function pointForGeometry(geometry) {
       if (!geometry) return null;
@@ -1364,7 +1618,8 @@ export function earthWatchHtml(): string {
             style:{color:color,weight:2,fillColor:color,fillOpacity:opacity*0.28}
           });
         }
-        layer.bindPopup(popup(event));
+        layer.bindPopup(function() { return popup(event); });
+        layer._earthEventId = event.id;
         layer.addTo(eventLayer);
         state.layerById[event.id] = layer;
         var heatPoint = pointForGeometry(event.geometry);
@@ -1376,8 +1631,264 @@ export function earthWatchHtml(): string {
         L.heatLayer(heat,{radius:32,blur:24,maxZoom:8,minOpacity:.24,gradient:{.2:"#69A88F",.5:"#D3921F",.75:"#DE5F26",1:"#BE2618"}}).addTo(heatLayer);
       }
       renderSignals(events);
+      renderAntipodes();
+      renderFeltRings();
+      pushGlobe(events);
       document.getElementById("quakeCount").textContent = String(events.filter(function(event){return event.family === "earthquake";}).length);
     }
+    // ---- Day and night -------------------------------------------------------
+    // Drawn as four nested bands rather than one hard edge, so the reader can see
+    // where it is morning, day, evening and night at a glance. Each band is the set
+    // of points whose solar elevation is below that band's floor; sampling longitude
+    // at a fixed step and solving latitude at each step traces its boundary.
+    var TERMINATOR_BANDS = [
+      { floor:0,   fill:"#0B1B2B", opacity:.13, label:"Civil twilight — sunrise and sunset" },
+      { floor:-6,  fill:"#0B1B2B", opacity:.13, label:"Nautical twilight — dusk and dawn" },
+      { floor:-12, fill:"#0B1B2B", opacity:.13, label:"Astronomical twilight" },
+      { floor:-18, fill:"#0B1B2B", opacity:.13, label:"Night" }
+    ];
+
+    function terminatorLatitude(lon, sun, elevationDeg) {
+      // Solve sin(elev) = sin(lat)sin(dec) + cos(lat)cos(dec)cos(dlon) for lat.
+      // Written as A*sin(lat) + B*cos(lat) = C, i.e. hypot*sin(lat + atan2(B,A)) = C.
+      var rad = Math.PI / 180;
+      var a = Math.sin(sun.lat * rad);
+      var b = Math.cos(sun.lat * rad) * Math.cos((lon - sun.lon) * rad);
+      var c = Math.sin(elevationDeg * rad);
+      var magnitude = Math.hypot(a, b);
+      if (magnitude < 1e-12) return null;
+      var ratio = c / magnitude;
+      if (ratio < -1 || ratio > 1) return null;
+      return (Math.asin(ratio) - Math.atan2(b, a)) / rad;
+    }
+
+    function darkPolygonFor(sun, elevationDeg) {
+      // Walk the whole world in longitude collecting the boundary latitude, then
+      // close the ring along whichever pole is currently in darkness.
+      var step = 2;
+      var edge = [];
+      var missing = 0;
+      for (var lon = -180; lon <= 180; lon += step) {
+        var lat = terminatorLatitude(lon, sun, elevationDeg);
+        if (lat === null) { missing += 1; continue; }
+        edge.push([Math.max(-90, Math.min(90, lat)), lon]);
+      }
+      // Polar day or polar night: the boundary never crosses this longitude band, so
+      // either the whole world is lit or the whole world is dark at this elevation.
+      if (edge.length < 3) {
+        var everywhereDark = solar.solarElevationDeg(0, sun.lon, sun) < elevationDeg &&
+          solar.solarElevationDeg(90, sun.lon, sun) < elevationDeg &&
+          solar.solarElevationDeg(-90, sun.lon, sun) < elevationDeg;
+        return everywhereDark ? [[90,-180],[90,180],[-90,180],[-90,-180]] : null;
+      }
+      var darkPole = sun.lat >= 0 ? -90 : 90;
+      var ring = edge.slice();
+      ring.push([darkPole, 180]);
+      ring.push([darkPole, -180]);
+      return ring;
+    }
+
+    function renderTerminator() {
+      terminatorLayer.clearLayers();
+      if (!state.dayNight) return;
+      var sun = solar.subsolarPoint(new Date());
+      TERMINATOR_BANDS.forEach(function(band) {
+        var ring = darkPolygonFor(sun, band.floor);
+        if (!ring) return;
+        L.polygon(ring, {
+          stroke:false, fill:true, fillColor:band.fill, fillOpacity:band.opacity,
+          interactive:false, className:"terminator-band"
+        }).addTo(terminatorLayer);
+      });
+      // A small marker for the subsolar point makes the overlay legible as solar
+      // geometry rather than an unexplained shadow.
+      L.circleMarker([sun.lat, sun.lon], {
+        radius:5, color:"#B8860B", weight:2, fillColor:"#FFD34D", fillOpacity:.9, interactive:true
+      }).bindPopup(
+        '<div class="popup-title">Sun overhead</div>' +
+        '<div class="popup-row">' + esc(sun.lat.toFixed(2)) + '&deg;, ' + esc(sun.lon.toFixed(2)) + '&deg;</div>' +
+        '<div class="popup-row">It is solar noon on this meridian right now.</div>'
+      ).addTo(terminatorLayer);
+    }
+
+    // ---- Antipodes -----------------------------------------------------------
+    function renderAntipodes() {
+      antipodeLayer.clearLayers();
+      if (!state.antipodes) return;
+      selectedEvents().forEach(function(event) {
+        if (event.family !== "earthquake" || !event.antipode) return;
+        addAntipodeMarker(event);
+      });
+    }
+
+    function addAntipodeMarker(event) {
+      var point = pointForGeometry(event.geometry);
+      if (!point || !event.antipode) return null;
+      var marker = L.circleMarker(event.antipode, {
+        radius:5, color:"#5B6B7C", weight:2, dashArray:"3 2",
+        fillColor:"#5B6B7C", fillOpacity:.18
+      }).bindPopup(
+        '<div class="popup-title">Antipode of ' + esc(event.title) + '</div>' +
+        '<div class="popup-row"><strong>Epicentre:</strong> ' + esc(point[0].toFixed(2)) + '&deg;, ' + esc(point[1].toFixed(2)) + '&deg;</div>' +
+        '<div class="popup-row"><strong>Antipode:</strong> ' + esc(event.antipode[0].toFixed(2)) + '&deg;, ' + esc(event.antipode[1].toFixed(2)) + '&deg;</div>' +
+        '<div class="popup-note">The point directly opposite through the centre of the Earth, about 20,000 km away. Shown as geometry only — no official source claims a relationship between an earthquake and its antipode.</div>'
+      );
+      marker.addTo(antipodeLayer);
+      return marker;
+    }
+
+    function showAntipode(eventId) {
+      var event = (state.data ? state.data.map.events : []).find(function(candidate) {
+        return candidate.id === eventId;
+      });
+      if (!event || !event.antipode) return;
+      if (!map.hasLayer(antipodeLayer)) map.addLayer(antipodeLayer);
+      var marker = addAntipodeMarker(event);
+      map.setView(event.antipode, Math.max(map.getZoom(), 3));
+      if (marker) marker.openPopup();
+    }
+
+    // ---- Felt shaking --------------------------------------------------------
+    function intensityLabel(value) {
+      var numerals = ["I","II","III","IV","V","VI","VII","VIII","IX","X","XI","XII"];
+      var index = Math.round(value) - 1;
+      return numerals[Math.max(0, Math.min(numerals.length - 1, index))];
+    }
+
+    function renderFeltRings() {
+      feltRingLayer.clearLayers();
+      if (!state.feltEventId || !state.data) return;
+      var event = state.data.map.events.find(function(candidate) {
+        return candidate.id === state.feltEventId;
+      });
+      if (!event) return;
+      var point = pointForGeometry(event.geometry);
+      if (!point) return;
+
+      var official = state.shakeMapCache[event.id];
+      if (official && official.contours) {
+        // Official contours win whenever USGS has published a ShakeMap: they carry
+        // the finite fault, directivity and site response that a circle cannot.
+        L.geoJSON(official.contours, {
+          style:function(feature) {
+            return {
+              color:(feature.properties && feature.properties.color) || "#BE2618",
+              weight:2, opacity:.95, fill:false
+            };
+          },
+          onEachFeature:function(feature, layer) {
+            var value = feature.properties && feature.properties.value;
+            layer.bindPopup(
+              '<div class="popup-title">Shaking intensity ' + esc(intensityLabel(value)) + '</div>' +
+              '<div class="popup-row">USGS ShakeMap contour, MMI ' + esc(value) + '</div>' +
+              '<div class="popup-note official">Official USGS product — observed and modeled by the issuing agency.</div>'
+            );
+          },
+          interactive:true
+        }).addTo(feltRingLayer);
+        return;
+      }
+
+      (event.feltRings || []).forEach(function(ring) {
+        L.circle(point, {
+          radius:ring.radiusKm * 1000, color:ring.color, weight:1.5, opacity:.9,
+          dashArray:"6 4", fillColor:ring.color, fillOpacity:.05
+        }).bindPopup(
+          '<div class="popup-title">Modeled intensity ' + esc(ring.numeral) + '</div>' +
+          '<div class="popup-row"><strong>' + esc(ring.shaking) + '</strong></div>' +
+          '<div class="popup-row">About ' + esc(Math.round(ring.radiusKm)) + ' km from the epicentre' +
+            (ring.clamped ? ' (at the edge of the model&rsquo;s published range)' : '') + '</div>' +
+          '<div class="popup-note">Projection, not an observation. Point-source estimate from Atkinson &amp; Wald (2007); a long rupture is felt considerably farther along its strike than this circle shows.</div>'
+        ).addTo(feltRingLayer);
+      });
+    }
+
+    function feltButtonLabel(event) {
+      if (state.feltEventId !== event.id) return "Felt radius";
+      if (state.feltSource === "loading") return "Loading USGS ShakeMap...";
+      return "Hide felt radius";
+    }
+
+    function toggleFelt(eventId) {
+      if (state.feltEventId === eventId) {
+        state.feltEventId = null;
+        state.feltSource = null;
+        renderFeltRings();
+        refreshOpenPopup();
+        return;
+      }
+      state.feltEventId = eventId;
+      if (!map.hasLayer(feltRingLayer)) map.addLayer(feltRingLayer);
+      var event = state.data.map.events.find(function(candidate) { return candidate.id === eventId; });
+      if (!event) return;
+      var cached = state.shakeMapCache[eventId];
+      state.feltSource = cached ? (cached.contours ? "official" : "modeled")
+        : (event.shaking && event.shaking.hasShakeMap ? "loading" : "modeled");
+      renderFeltRings();
+      refreshOpenPopup();
+      if (!cached && event.shaking && event.shaking.hasShakeMap) {
+        loadShakeMap(event);
+      }
+    }
+
+    async function loadShakeMap(event) {
+      // Two hops, both CORS-open on earthquake.usgs.gov: the event record names the
+      // versioned product URL, and that product is the MMI contour GeoJSON. Any
+      // failure falls back to the model rather than blanking the panel — but it is
+      // recorded as a failure so the label never claims official data it does not have.
+      var eventId = event.shaking && event.shaking.usgsEventId;
+      if (!eventId) { markShakeMapUnavailable(event, "no USGS event id"); return; }
+      try {
+        var detail = await fetch(
+          "https://earthquake.usgs.gov/fdsnws/event/1/query?format=geojson&eventid=" +
+          encodeURIComponent(eventId)
+        );
+        if (!detail.ok) throw new Error("USGS event query returned HTTP " + detail.status);
+        var record = await detail.json();
+        var products = record && record.properties && record.properties.products;
+        var shakemap = products && products.shakemap && products.shakemap[0];
+        var contents = shakemap && shakemap.contents;
+        var entry = contents && (contents["download/cont_mmi.json"] || contents["download/cont_mi.json"]);
+        if (!entry || !entry.url) throw new Error("no MMI contour product published");
+        var contourResponse = await fetch(entry.url);
+        if (!contourResponse.ok) throw new Error("contour fetch returned HTTP " + contourResponse.status);
+        var contours = await contourResponse.json();
+        if (!contours || !contours.features || !contours.features.length) {
+          throw new Error("contour product was empty");
+        }
+        state.shakeMapCache[event.id] = { contours:contours };
+        if (state.feltEventId === event.id) {
+          state.feltSource = "official";
+          renderFeltRings();
+          refreshOpenPopup();
+        }
+      } catch (error) {
+        markShakeMapUnavailable(event, error && error.message ? error.message : String(error));
+      }
+    }
+
+    function markShakeMapUnavailable(event, reason) {
+      state.shakeMapCache[event.id] = { contours:null, reason:reason };
+      if (state.feltEventId !== event.id) return;
+      state.feltSource = "modeled";
+      renderFeltRings();
+      refreshOpenPopup();
+    }
+
+    function refreshOpenPopup() {
+      var layer = state.layerById[state.feltEventId] || null;
+      var openPopup = map._popup;
+      if (!openPopup || !openPopup.isOpen()) return;
+      var target = openPopup._source;
+      if (!target || !target._earthEventId) return;
+      var event = state.data.map.events.find(function(candidate) {
+        return candidate.id === target._earthEventId;
+      });
+      if (!event) return;
+      openPopup.setContent(popup(event));
+      if (layer) { /* keep the reference used by callers above */ }
+    }
+
     function renderRegions() {
       regionLayer.clearLayers();
       state.data.map.regions.forEach(function(region) {
@@ -1517,7 +2028,45 @@ export function earthWatchHtml(): string {
       document.getElementById("regionCount").textContent = String(data.map.regions.filter(function(region){ return Number(region.effectiveStage.slice(1)) >= 2; }).length);
       document.getElementById("mapFocus").textContent = data.map.focus.mode === "signal_cluster" ? "Top activity: " + data.map.focus.label + "." : "No eligible global signal; showing the United States fallback.";
       document.getElementById("method").textContent = data.map.method + " " + data.map.coverage;
-      renderNotable(); renderSources(); renderRegions(); renderMap(); renderContext();
+      renderNotable(); renderSources(); renderRegions(); renderTerminator(); renderMap(); renderContext();
+    }
+
+    // ---- Globe bridge --------------------------------------------------------
+    // The globe lives in a module script (it imports three.js) and publishes itself
+    // on window.EarthGlobe when ready. Every call here is guarded: if WebGL is
+    // unavailable or three.js fails to load, the flat map keeps working untouched.
+    function pushGlobe(events) {
+      if (!window.EarthGlobe) return;
+      try {
+        window.EarthGlobe.setEvents(events || selectedEvents(), {
+          antipodes:state.antipodes, colors:colors
+        });
+      } catch (error) {}
+    }
+
+    function syncGlobeSettings() {
+      if (!window.EarthGlobe) return;
+      try {
+        window.EarthGlobe.setDayNight(state.dayNight);
+        window.EarthGlobe.setSpin(state.spin);
+        window.EarthGlobe.setActive(state.view === "globe");
+      } catch (error) {}
+    }
+
+    window.addEventListener("earth-globe-ready", function() {
+      syncGlobeSettings();
+      pushGlobe(state.data ? selectedEvents() : []);
+    });
+
+    function setView(view) {
+      state.view = view;
+      document.getElementById("stage").setAttribute("data-stage", view);
+      Array.prototype.forEach.call(document.querySelectorAll("button[data-view]"), function(button) {
+        button.classList.toggle("active", button.getAttribute("data-view") === view);
+      });
+      syncGlobeSettings();
+      if (view === "map") setTimeout(function(){ map.invalidateSize(); }, 40);
+      else pushGlobe(state.data ? selectedEvents() : []);
     }
     function applyDefaultFocus() {
       if (!state.data || !state.data.map.focus) return;
@@ -1564,6 +2113,53 @@ export function earthWatchHtml(): string {
       try { localStorage.setItem("earthWatch.signalSort",state.sort); } catch (error) {}
       renderSignals(selectedEvents()); renderContext();
     });
+    Array.prototype.forEach.call(document.querySelectorAll("button[data-view]"),function(button) {
+      button.addEventListener("click",function() { setView(button.getAttribute("data-view")); });
+    });
+    document.getElementById("dayNight").addEventListener("change",function(event) {
+      state.dayNight = event.target.checked;
+      renderTerminator();
+      syncGlobeSettings();
+    });
+    document.getElementById("antipodeLayer").addEventListener("change",function(event) {
+      state.antipodes = event.target.checked;
+      renderAntipodes();
+      pushGlobe();
+    });
+    document.getElementById("autoSpin").addEventListener("change",function(event) {
+      state.spin = event.target.checked;
+      syncGlobeSettings();
+    });
+    document.getElementById("globeReset").addEventListener("click",function() {
+      if (window.EarthGlobe) window.EarthGlobe.recentre();
+    });
+    document.getElementById("globeFollow").addEventListener("click",function() {
+      if (!window.EarthGlobe || !state.data) return;
+      var focus = state.data.map.focus;
+      var pressed = this.getAttribute("aria-pressed") === "true";
+      this.setAttribute("aria-pressed", pressed ? "false" : "true");
+      if (!pressed && focus && focus.center) window.EarthGlobe.lookAt(focus.center[0], focus.center[1]);
+    });
+
+    // Popup buttons are rebuilt as HTML strings on every open, so bind once by
+    // delegation on the map container rather than per-popup.
+    document.getElementById("map").addEventListener("click",function(clickEvent) {
+      var button = clickEvent.target.closest ? clickEvent.target.closest("[data-earth-action]") : null;
+      if (!button) return;
+      clickEvent.preventDefault();
+      var action = button.getAttribute("data-earth-action");
+      var id = button.getAttribute("data-earth-id");
+      if (action === "antipode") showAntipode(id);
+      if (action === "felt") toggleFelt(id);
+    });
+
+    // The terminator moves about a quarter of a degree a minute; redraw it on a
+    // slow tick so the page stays honest between the five-minute data reloads.
+    setInterval(function() {
+      if (state.dayNight) renderTerminator();
+      syncGlobeSettings();
+    },60*1000);
+
     document.getElementById("resetFocus").addEventListener("click",applyDefaultFocus);
     document.getElementById("locate").addEventListener("click",function() {
       if (!navigator.geolocation) return;
@@ -1582,6 +2178,455 @@ export function earthWatchHtml(): string {
     load();
     setInterval(load,5*60*1000);
   })();
+  </script>
+
+  <script type="module">
+  // 3D globe. Deliberately additive: if three.js or WebGL is unavailable this whole
+  // block throws and window.EarthGlobe is never defined, which every caller in the
+  // classic script above already guards for. The flat map is never at risk.
+  import * as THREE from "/assets/three-0.180.0/three.module.js";
+
+  const solar = window.__earthSolar;
+  const canvas = document.getElementById("globe");
+  const statusEl = document.getElementById("globeStatus");
+  const clockEl = document.getElementById("globeClock");
+
+  function setStatus(text) { if (statusEl) statusEl.textContent = text; }
+
+  let renderer;
+  try {
+    renderer = new THREE.WebGLRenderer({ canvas, antialias:true, alpha:false });
+  } catch (error) {
+    setStatus("This browser cannot draw the 3D globe. The flat map has the same data.");
+    throw error;
+  }
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x05070D);
+  const camera = new THREE.PerspectiveCamera(38, 1, 0.01, 100);
+
+  const GLOBE_RADIUS = 1;
+  const state = {
+    active:false, dayNight:true, spin:true,
+    distance:3.35, yaw:0, pitch:0, dragging:false, lastPointer:null,
+    events:[], colors:{}, showAntipodes:false, hovered:null
+  };
+
+  // ---- Imagery -------------------------------------------------------------
+  // NASA GIBS serves EPSG:4326 (plate carree) tiles, which is exactly the projection
+  // an equirectangular sphere texture wants — no reprojection needed. Blue Marble
+  // Shaded Relief + Bathymetry is a static, public-domain NASA product, and NASA is
+  // already one of this page's disclosed official sources.
+  //
+  // The level geometry below is read from the published WMTS capabilities, NOT from
+  // the usual 2^z assumption, because for this TileMatrixSet that assumption is
+  // WRONG and wrong in a way that looks fine: levels 1 (3x2) and 2 (5x3) are not
+  // 2:1 grids, so pasting them into an equirectangular texture stretches the map and
+  // silently displaces every earthquake. Only levels 0, 3, 4, 5+ are exactly 2:1.
+  const GIBS_LAYER = "BlueMarble_ShadedRelief_Bathymetry";
+  const GIBS_TILE = 512;
+  const GIBS_FAST = { level:0, cols:2, rows:1 };   // 1024 x 512, ~52 KB, 2 requests
+  const GIBS_SHARP = { level:3, cols:10, rows:5 }; // 5120 x 2560, ~1.6 MB, 50 requests
+
+  function fallbackTexture() {
+    // A plain ocean-and-graticule sphere, so a failed image load still yields a
+    // usable globe rather than a black ball. Explicitly not a map of anything.
+    const c = document.createElement("canvas");
+    c.width = 1024; c.height = 512;
+    const ctx = c.getContext("2d");
+    ctx.fillStyle = "#12314A"; ctx.fillRect(0,0,c.width,c.height);
+    ctx.strokeStyle = "rgba(198,212,228,.28)"; ctx.lineWidth = 1;
+    for (let lon = 0; lon <= 1024; lon += 1024/12) {
+      ctx.beginPath(); ctx.moveTo(lon,0); ctx.lineTo(lon,512); ctx.stroke();
+    }
+    for (let lat = 0; lat <= 512; lat += 512/6) {
+      ctx.beginPath(); ctx.moveTo(0,lat); ctx.lineTo(1024,lat); ctx.stroke();
+    }
+    const texture = new THREE.CanvasTexture(c);
+    texture.colorSpace = THREE.SRGBColorSpace;
+    return texture;
+  }
+
+  async function loadGibsTexture(grid) {
+    const c = document.createElement("canvas");
+    c.width = grid.cols * GIBS_TILE;
+    c.height = grid.rows * GIBS_TILE;
+    const ctx = c.getContext("2d");
+    ctx.fillStyle = "#0B2135";
+    ctx.fillRect(0, 0, c.width, c.height);
+
+    let loaded = 0;
+    const jobs = [];
+    for (let row = 0; row < grid.rows; row += 1) {
+      for (let col = 0; col < grid.cols; col += 1) {
+        const url = "https://gibs.earthdata.nasa.gov/wmts/epsg4326/best/" + GIBS_LAYER +
+          "/default/500m/" + grid.level + "/" + row + "/" + col + ".jpeg";
+        jobs.push(new Promise((resolve) => {
+          const image = new Image();
+          image.crossOrigin = "anonymous";
+          image.onload = () => {
+            ctx.drawImage(image, col * GIBS_TILE, row * GIBS_TILE, GIBS_TILE, GIBS_TILE);
+            loaded += 1;
+            resolve();
+          };
+          image.onerror = () => resolve();   // a hole is better than a blank globe
+          image.src = url;
+        }));
+      }
+    }
+    await Promise.all(jobs);
+    const total = grid.cols * grid.rows;
+    if (!loaded) return { texture:null, loaded:0, total };
+    const texture = new THREE.CanvasTexture(c);
+    texture.colorSpace = THREE.SRGBColorSpace;
+    texture.anisotropy = renderer.capabilities.getMaxAnisotropy();
+    return { texture, loaded, total };
+  }
+
+  let sharpRequested = false;
+  async function upgradeImagery() {
+    // 1.6 MB of tiles is not worth spending on a reader who never opens the globe,
+    // so the sharp texture is fetched once, on first activation, in the background.
+    if (sharpRequested) return;
+    sharpRequested = true;
+    const sharp = await loadGibsTexture(GIBS_SHARP);
+    if (sharp.texture && sharp.loaded === sharp.total) {
+      const previous = globeUniforms.dayMap.value;
+      globeUniforms.dayMap.value = sharp.texture;
+      if (previous && previous.dispose) previous.dispose();
+    }
+  }
+
+  // ---- Globe ---------------------------------------------------------------
+  const globeUniforms = {
+    dayMap:{ value: fallbackTexture() },
+    sunDirection:{ value: new THREE.Vector3(1,0,0) },
+    dayNightMix:{ value: 1 }
+  };
+
+  const globe = new THREE.Mesh(
+    new THREE.SphereGeometry(GLOBE_RADIUS, 96, 64),
+    new THREE.ShaderMaterial({
+      uniforms: globeUniforms,
+      vertexShader: [
+        "varying vec2 vUv;",
+        "varying vec3 vObjectNormal;",
+        "void main() {",
+        "  vUv = uv;",
+        "  vObjectNormal = normalize(normal);",
+        "  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);",
+        "}"
+      ].join("\\n"),
+      // The globe never rotates — the camera orbits it — so the object-space normal
+      // is also the world-space normal, and can be compared directly against the
+      // subsolar direction computed by the same geoToVector the markers use.
+      fragmentShader: [
+        "uniform sampler2D dayMap;",
+        "uniform vec3 sunDirection;",
+        "uniform float dayNightMix;",
+        "varying vec2 vUv;",
+        "varying vec3 vObjectNormal;",
+        "void main() {",
+        "  vec3 base = texture2D(dayMap, vUv).rgb;",
+        "  float cosAngle = clamp(dot(normalize(vObjectNormal), normalize(sunDirection)), -1.0, 1.0);",
+        "  float elevation = degrees(asin(cosAngle));",
+        // Same 18-degree ramp as nightFraction() in src/logic/solar.ts, so the globe
+        // and the flat map agree about where night begins.
+        "  float night = clamp(-elevation / 18.0, 0.0, 1.0) * dayNightMix;",
+        // Night keeps a third of the daylight value rather than going near-black.
+        // Physically the dark side would be almost invisible, but the point of this
+        // view is to see what is happening everywhere at once, and half the world is
+        // always in darkness — an accurate render would hide half the events.
+        "  vec3 nightColor = base * 0.34 + vec3(0.020, 0.034, 0.072);",
+        "  vec3 color = mix(base, nightColor, night);",
+        "  float twilight = smoothstep(9.0, 0.0, abs(elevation)) * dayNightMix;",
+        "  color += vec3(0.30, 0.14, 0.04) * twilight;",
+        "  gl_FragColor = vec4(color, 1.0);",
+        "}"
+      ].join("\\n")
+    })
+  );
+  scene.add(globe);
+
+  const atmosphere = new THREE.Mesh(
+    new THREE.SphereGeometry(GLOBE_RADIUS * 1.022, 64, 48),
+    new THREE.ShaderMaterial({
+      transparent:true, side:THREE.BackSide, depthWrite:false, blending:THREE.AdditiveBlending,
+      vertexShader: [
+        "varying vec3 vNormal;",
+        "void main() {",
+        "  vNormal = normalize(normalMatrix * normal);",
+        "  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);",
+        "}"
+      ].join("\\n"),
+      fragmentShader: [
+        "varying vec3 vNormal;",
+        "void main() {",
+        "  float rim = pow(0.72 - dot(vNormal, vec3(0.0, 0.0, 1.0)), 2.4);",
+        "  gl_FragColor = vec4(0.34, 0.55, 0.85, 1.0) * clamp(rim, 0.0, 1.0) * 0.55;",
+        "}"
+      ].join("\\n")
+    })
+  );
+  scene.add(atmosphere);
+
+  function discTexture() {
+    const c = document.createElement("canvas");
+    c.width = 64; c.height = 64;
+    const ctx = c.getContext("2d");
+    const gradient = ctx.createRadialGradient(32,32,0,32,32,32);
+    gradient.addColorStop(0,"rgba(255,255,255,1)");
+    gradient.addColorStop(.45,"rgba(255,255,255,.92)");
+    gradient.addColorStop(1,"rgba(255,255,255,0)");
+    ctx.fillStyle = gradient;
+    ctx.fillRect(0,0,64,64);
+    return new THREE.CanvasTexture(c);
+  }
+
+  const markerGeometry = new THREE.BufferGeometry();
+  const markers = new THREE.Points(markerGeometry, new THREE.PointsMaterial({
+    size:0.036, map:discTexture(), vertexColors:true, transparent:true,
+    sizeAttenuation:true, depthWrite:false, alphaTest:0.04
+  }));
+  scene.add(markers);
+
+  const antipodeGeometry = new THREE.BufferGeometry();
+  const antipodeMarkers = new THREE.Points(antipodeGeometry, new THREE.PointsMaterial({
+    size:0.024, map:discTexture(), color:0x9FB2C4, transparent:true, opacity:.75,
+    sizeAttenuation:true, depthWrite:false, alphaTest:0.04
+  }));
+  scene.add(antipodeMarkers);
+
+  const sunMarker = new THREE.Mesh(
+    new THREE.SphereGeometry(0.02, 16, 12),
+    new THREE.MeshBasicMaterial({ color:0xFFD34D })
+  );
+  scene.add(sunMarker);
+
+  // ---- Interaction ---------------------------------------------------------
+  function applyCamera() {
+    state.pitch = Math.max(-1.35, Math.min(1.35, state.pitch));
+    state.distance = Math.max(1.35, Math.min(7, state.distance));
+    const cosPitch = Math.cos(state.pitch);
+    camera.position.set(
+      state.distance * cosPitch * Math.sin(state.yaw),
+      state.distance * Math.sin(state.pitch),
+      state.distance * cosPitch * Math.cos(state.yaw)
+    );
+    camera.lookAt(0,0,0);
+  }
+
+  canvas.addEventListener("pointerdown", (event) => {
+    state.dragging = true;
+    state.lastPointer = { x:event.clientX, y:event.clientY };
+    canvas.setPointerCapture(event.pointerId);
+  });
+  canvas.addEventListener("pointerup", (event) => {
+    state.dragging = false;
+    try { canvas.releasePointerCapture(event.pointerId); } catch (error) {}
+  });
+  canvas.addEventListener("pointerleave", () => { state.dragging = false; });
+  canvas.addEventListener("pointermove", (event) => {
+    if (state.dragging && state.lastPointer) {
+      state.yaw -= (event.clientX - state.lastPointer.x) * 0.006;
+      state.pitch += (event.clientY - state.lastPointer.y) * 0.006;
+      state.lastPointer = { x:event.clientX, y:event.clientY };
+      applyCamera();
+    } else {
+      hoverAt(event);
+    }
+  });
+  canvas.addEventListener("wheel", (event) => {
+    event.preventDefault();
+    state.distance *= event.deltaY > 0 ? 1.09 : 0.92;
+    applyCamera();
+  }, { passive:false });
+
+  const raycaster = new THREE.Raycaster();
+  raycaster.params.Points.threshold = 0.022;
+  const pointer = new THREE.Vector2();
+
+  function hoverAt(event) {
+    if (!state.active || !state.events.length) return;
+    const rect = canvas.getBoundingClientRect();
+    pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+    pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+    raycaster.setFromCamera(pointer, camera);
+    const hits = raycaster.intersectObject(markers);
+    // Only accept a hit on the hemisphere facing the camera; without this the ray
+    // passes through the globe and labels an event on the far side.
+    const visible = hits.filter((hit) => hit.point.clone().normalize().dot(
+      camera.position.clone().normalize()
+    ) > 0);
+    state.hovered = visible.length ? state.events[visible[0].index] || null : null;
+    describe();
+  }
+
+  // ---- Frame ---------------------------------------------------------------
+  function describe() {
+    if (!state.events.length) {
+      setStatus("No qualifying official signals in this view.");
+      return;
+    }
+    if (state.hovered) {
+      const event = state.hovered;
+      const detail = [event.sourceLabel];
+      if (typeof event.magnitude === "number") detail.push("M" + event.magnitude.toFixed(1));
+      if (typeof event.depthKm === "number") detail.push(Math.round(event.depthKm) + " km deep");
+      setStatus(event.title + "  ·  " + detail.join("  ·  "));
+      return;
+    }
+    setStatus(
+      state.events.length + " official signals plotted  ·  drag to turn, scroll to zoom, hover a point to identify it" +
+      (state.showAntipodes ? "  ·  grey points are earthquake antipodes" : "")
+    );
+  }
+
+  function updateSun() {
+    const sun = solar.subsolarPoint(new Date());
+    const vector = solar.geoToVector(sun.lat, sun.lon);
+    globeUniforms.sunDirection.value.set(vector.x, vector.y, vector.z);
+    sunMarker.position.set(vector.x * 1.5, vector.y * 1.5, vector.z * 1.5);
+    sunMarker.visible = state.dayNight;
+    if (clockEl) {
+      const now = new Date();
+      clockEl.textContent =
+        now.toISOString().slice(11,16) + " UTC\\n" +
+        "sun overhead " + sun.lat.toFixed(1) + "\\u00B0, " + sun.lon.toFixed(1) + "\\u00B0";
+    }
+  }
+
+  let lastFrame = performance.now();
+  function frame(now) {
+    requestAnimationFrame(frame);
+    const elapsed = (now - lastFrame) / 1000;
+    lastFrame = now;
+    if (!state.active) return;
+    if (state.spin && !state.dragging) {
+      state.yaw += elapsed * 0.045;
+      applyCamera();
+    }
+    updateSun();
+    renderer.render(scene, camera);
+  }
+
+  function resize() {
+    const parent = canvas.parentElement;
+    if (!parent) return;
+    const width = parent.clientWidth || 1;
+    const height = parent.clientHeight || 1;
+    renderer.setSize(width, height, false);
+    camera.aspect = width / height;
+    camera.updateProjectionMatrix();
+  }
+
+  if (typeof ResizeObserver === "function") {
+    new ResizeObserver(resize).observe(canvas.parentElement);
+  }
+  window.addEventListener("resize", resize);
+
+  // ---- Public surface ------------------------------------------------------
+  window.EarthGlobe = {
+    setActive(active) {
+      state.active = active;
+      if (!active) return;
+      resize();
+      describe();
+      upgradeImagery();
+    },
+    setDayNight(on) {
+      state.dayNight = on;
+      globeUniforms.dayNightMix.value = on ? 1 : 0;
+    },
+    setSpin(on) { state.spin = on; },
+    recentre() {
+      state.yaw = 0; state.pitch = 0; state.distance = 3.35;
+      applyCamera();
+    },
+    lookAt(lat, lon) {
+      // Derived from the SAME geoToVector the markers use rather than from a
+      // hand-written azimuth formula. applyCamera places the camera at
+      // (cos p sin y, sin p, cos p cos y), so inverting that against the target's
+      // unit vector is exact and cannot drift away from where the markers sit.
+      const target = solar.geoToVector(lat, lon);
+      state.pitch = Math.asin(Math.max(-1, Math.min(1, target.y)));
+      state.yaw = Math.atan2(target.x, target.z);
+      state.distance = 2.3;
+      applyCamera();
+    },
+    setEvents(events, options) {
+      const points = (events || []).filter((event) =>
+        event.geometry && event.geometry.type === "Point" &&
+        Number.isFinite(Number(event.geometry.coordinates[0])) &&
+        Number.isFinite(Number(event.geometry.coordinates[1]))
+      );
+      state.events = points;
+      state.colors = (options && options.colors) || state.colors;
+      state.showAntipodes = Boolean(options && options.antipodes);
+
+      const positions = new Float32Array(points.length * 3);
+      const colors = new Float32Array(points.length * 3);
+      const tint = new THREE.Color();
+      points.forEach((event, index) => {
+        const lon = Number(event.geometry.coordinates[0]);
+        const lat = Number(event.geometry.coordinates[1]);
+        // Lift the marker off the surface so it is not z-fought by the sphere, and
+        // lift it further with score so the strongest signals read first.
+        const lift = 1.008 + Math.min(0.05, (event.score || 0) / 1600);
+        const vector = solar.geoToVector(lat, lon, lift);
+        positions[index*3] = vector.x;
+        positions[index*3+1] = vector.y;
+        positions[index*3+2] = vector.z;
+        tint.set(state.colors[event.family] || "#697B73");
+        colors[index*3] = tint.r;
+        colors[index*3+1] = tint.g;
+        colors[index*3+2] = tint.b;
+      });
+      markerGeometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+      markerGeometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+      markerGeometry.computeBoundingSphere();
+
+      const anti = state.showAntipodes
+        ? points.filter((event) => event.family === "earthquake" && event.antipode)
+        : [];
+      const antiPositions = new Float32Array(anti.length * 3);
+      anti.forEach((event, index) => {
+        const vector = solar.geoToVector(event.antipode[0], event.antipode[1], 1.008);
+        antiPositions[index*3] = vector.x;
+        antiPositions[index*3+1] = vector.y;
+        antiPositions[index*3+2] = vector.z;
+      });
+      antipodeGeometry.setAttribute("position", new THREE.BufferAttribute(antiPositions, 3));
+      antipodeGeometry.computeBoundingSphere();
+      antipodeMarkers.visible = anti.length > 0;
+
+      state.hovered = null;
+      describe();
+    }
+  };
+
+  applyCamera();
+  resize();
+  updateSun();
+  requestAnimationFrame(frame);
+  window.dispatchEvent(new Event("earth-globe-ready"));
+
+  loadGibsTexture(GIBS_FAST).then(({ texture, loaded, total }) => {
+    if (texture) globeUniforms.dayMap.value = texture;
+    if (loaded < total) {
+      setStatus(
+        loaded === 0
+          ? "NASA imagery unavailable — showing a plain graticule. Event positions are unaffected."
+          : "NASA Blue Marble loaded with " + (total - loaded) + " of " + total + " tiles missing."
+      );
+      setTimeout(describe, 4000);
+    } else {
+      describe();
+    }
+  }).catch(() => {
+    setStatus("NASA imagery unavailable — showing a plain graticule. Event positions are unaffected.");
+  });
   </script>
 </body>
 </html>`;
