@@ -657,6 +657,41 @@ describe("Earth Watch event detail", () => {
     expect(detail.zones).toBeUndefined();
   });
 
+  it("keeps an aggregating feed's agency links so it need not point at its own API", () => {
+    // EONET's own `link` is its API document for the event. Its `sources` are the
+    // issuing agency's real pages. Without this, an EONET row's only destination
+    // is JSON — the same defect as the NWS alert rows, in a different source.
+    const snapshot = emptySnapshot();
+    snapshot.events = [
+      eventFixture({
+        id: "eonet",
+        source: "nasa_eonet",
+        externalId: "EONET_22562",
+        eventType: "natural_event",
+        title: "Tropical Storm Hernan",
+        magnitude: undefined,
+        depthKm: undefined,
+        region: undefined,
+        officialUrl: "https://eonet.gsfc.nasa.gov/api/v3/events/EONET_22562",
+        rawJson: {
+          sources: [
+            { id: "JTWC", url: "https://www.metoc.navy.mil/jtwc/products/ep0826.tcw" },
+            { id: "NOAA_NHC", url: "https://www.nhc.noaa.gov/archive/2026/HERNAN.shtml" },
+            { id: "insecure", url: "http://example.com/nope" },
+            { id: "broken", url: "not a url" }
+          ]
+        }
+      })
+    ];
+    const detail = buildEarthWatchData(snapshot, DEFAULT_CONFIG, NOW).map.events.find(
+      (event) => event.id === "eonet"
+    )!.detail!;
+    expect(detail.sourceLinks).toEqual([
+      { id: "JTWC", url: "https://www.metoc.navy.mil/jtwc/products/ep0826.tcw" },
+      { id: "NOAA_NHC", url: "https://www.nhc.noaa.gov/archive/2026/HERNAN.shtml" }
+    ]);
+  });
+
   it("lifts the agency's own words out of the stored alert", () => {
     const detail = alertEvent(NWS_ALERT_PROPERTIES).detail!;
     expect(detail.headline).toContain("Flood Watch issued August 14");

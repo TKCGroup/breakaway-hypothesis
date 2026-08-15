@@ -121,6 +121,16 @@ export interface EarthEventDetail {
   zones?: string[];
   /** The agency's own prose description of the area, e.g. "Big Island Windward Waters". */
   areaDesc?: string;
+  /**
+   * Human-readable agency pages for this event, from a feed that aggregates other
+   * agencies — EONET's `sources` is the case that exists today.
+   *
+   * EONET's own `link` is its API document for the event, so without this an
+   * EONET row's only destination is JSON. Its `sources` point at the issuing
+   * agency's actual page (NHC's storm archive, InciWeb, GDACS), which is where a
+   * reader wanted to go in the first place.
+   */
+  sourceLinks?: { id: string; url: string }[];
 }
 
 /**
@@ -500,7 +510,10 @@ function eventDetail(event: NormalizedEvent): EarthEventDetail | undefined {
     issuedBy: trimmedText(properties.senderName),
     expiresAt: parseDate(properties.expires)?.toISOString(),
     zones: alertZones(properties.affectedZones),
-    areaDesc: trimmedText(properties.areaDesc)
+    areaDesc: trimmedText(properties.areaDesc),
+    // Read from the payload ROOT, not from properties: EONET is a plain object,
+    // not a GeoJSON Feature, so its sources never appear under properties.
+    sourceLinks: agencySourceLinks(asObject(event.rawJson).sources)
   };
   // Do not emit a detail block whose only content repeats the title.
   if (detail.headline && detail.summary === detail.headline) delete detail.summary;
@@ -523,6 +536,38 @@ function trimmedText(value: unknown): string | undefined {
  * become the target of a browser request. The CSP is the second layer and would
  * refuse a foreign host anyway; this is the first.
  */
+/**
+ * Agency pages carried by an aggregating feed, kept only if https.
+ *
+ * Same trust boundary as `alertZones`: these become hrefs a reader clicks, and
+ * they arrive from a third-party feed. Unlike the zone list this one is not
+ * host-pinned, because the whole point is that it links OUT to whichever agency
+ * issued the notice — so the protocol check is the guard, and the client passes
+ * every one of these through safeUrl as well.
+ */
+function agencySourceLinks(
+  value: unknown
+): { id: string; url: string }[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const links: { id: string; url: string }[] = [];
+  for (const entry of value) {
+    const record = asObject(entry);
+    const href = trimmedText(record.url);
+    if (!href) continue;
+    let parsed: URL;
+    try {
+      parsed = new URL(href);
+    } catch {
+      continue;
+    }
+    if (parsed.protocol !== "https:") continue;
+    if (links.some((link) => link.url === parsed.href)) continue;
+    links.push({ id: trimmedText(record.id) ?? parsed.hostname, url: parsed.href });
+    if (links.length >= 4) break;
+  }
+  return links.length ? links : undefined;
+}
+
 function alertZones(value: unknown): string[] | undefined {
   if (!Array.isArray(value)) return undefined;
   const zones: string[] = [];
@@ -1797,6 +1842,16 @@ ${solarClientSource()}
       }
       if (event.source.indexOf("tsunami_") === 0) {
         return { url:"https://www.tsunami.gov/", label:"NOAA Tsunami Warning Center" };
+      }
+      // Last resort, and the one that rescues EONET: an aggregating feed whose own
+      // link is an API document usually names the issuing agency's real page. This
+      // is deliberately source-agnostic — any feed that starts carrying sources
+      // gets a readable destination without another branch being added here.
+      var agency = (event.detail && event.detail.sourceLinks || [])[0];
+      if (agency && agency.url) {
+        // No esc() here: every consumer of this label escapes it, and escaping
+        // twice would render the entities literally.
+        return { url:agency.url, label:agency.id + " page for this event" };
       }
       return null;
     }
