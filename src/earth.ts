@@ -74,6 +74,30 @@ export interface EarthMapEvent {
   shaking?: EarthShakingReport;
   /** Modeled perceptibility rings. Only for earthquakes with a magnitude. */
   feltRings?: FeltRing[];
+  /** The issuing agency's own words about this event, when it published any. */
+  detail?: EarthEventDetail;
+}
+
+/**
+ * What the agency actually wrote, lifted out of the stored payload.
+ *
+ * NWS carries the whole warning — what is happening, where, and what to do — in
+ * every alert, but publishes no per-alert human page: its `web` field is the
+ * literal string "http://www.weather.gov" on every single alert, so linking a
+ * reader to "the official record" sent them to raw JSON. The text was already in
+ * the database; it just had nowhere to go.
+ */
+export interface EarthEventDetail {
+  /** One-line agency summary, e.g. "Flood Watch issued August 14 at 9:41PM CDT". */
+  headline?: string;
+  /** The body of the notice — the WHAT / WHERE / IMPACTS narrative. */
+  summary?: string;
+  /** What the agency tells people to do. Absent on most non-weather sources. */
+  instruction?: string;
+  /** Issuing office, e.g. "NWS Lincoln IL". */
+  issuedBy?: string;
+  /** When the notice stops applying, ISO 8601. */
+  expiresAt?: string;
 }
 
 /**
@@ -423,11 +447,41 @@ function earthMapEvent(
     mapContext,
     antipode: antipodeOf(event),
     shaking: shakingReport(event),
+    detail: eventDetail(event),
     feltRings:
       family === "earthquake" && Number.isFinite(event.magnitude)
         ? feltRings(event.magnitude, event.depthKm)
         : undefined
   };
+}
+
+/**
+ * The agency's own text for this event, if the stored payload carries any.
+ *
+ * Deliberately reads the raw payload rather than only `body`: the normaliser keeps
+ * `body` to a headline, which is a label, not an explanation. Everything is
+ * optional and nothing is defaulted — an alert with no instruction is common and
+ * inventing one would be worse than showing none.
+ */
+function eventDetail(event: NormalizedEvent): EarthEventDetail | undefined {
+  const properties = asObject(asObject(event.rawJson).properties);
+  const detail: EarthEventDetail = {
+    headline: trimmedText(properties.headline) ?? trimmedText(event.body),
+    summary: trimmedText(properties.description) ?? trimmedText(event.body),
+    instruction: trimmedText(properties.instruction),
+    issuedBy: trimmedText(properties.senderName),
+    expiresAt: parseDate(properties.expires)?.toISOString()
+  };
+  // Do not emit a detail block whose only content repeats the title.
+  if (detail.headline && detail.summary === detail.headline) delete detail.summary;
+  const hasContent = Object.values(detail).some((value) => value !== undefined);
+  return hasContent ? detail : undefined;
+}
+
+function trimmedText(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const text = value.trim();
+  return text.length ? text : undefined;
 }
 
 function antipodeOf(event: NormalizedEvent): [number, number] | undefined {
@@ -1177,7 +1231,17 @@ export function earthWatchHtml(): string {
     .popup-title { font-weight:750; line-height:1.3; margin-bottom:6px; }
     .popup-row { font-size:11px; color:var(--muted); margin-top:3px; }
     .popup-row strong { color:var(--ink); }
-    .popup-link { display:inline-block; margin-top:8px; font-weight:700; }
+    .popup-link { display:block; margin-top:8px; font-weight:700; }
+    .popup-link.secondary { font-weight:500; font-size:11px; color:var(--muted); margin-top:4px; }
+    .popup-detail {
+      margin-top:9px; padding:9px 10px; background:var(--paper); border:1px solid var(--hair);
+      border-radius:3px; max-height:210px; overflow-y:auto; font-size:11.5px; line-height:1.5;
+      white-space:pre-line;
+    }
+    .popup-detail p { margin:0 0 8px; }
+    .popup-detail p:last-child { margin-bottom:0; }
+    .detail-headline { font-weight:700; color:var(--ink); }
+    .detail-instruction { border-top:1px solid var(--hair); padding-top:7px; }
     body.map-fs { overflow:hidden; }
     .map-card.fs { position:fixed; inset:0; z-index:2000; border:0; border-radius:0; }
     .map-card.fs #map { height:100vh; height:100dvh; }
@@ -1529,8 +1593,80 @@ ${solarClientSource()}
         (event.staleGateReasons.length ? '<div class="popup-row"><strong>Notification blocked by:</strong> ' + esc(event.staleGateReasons.join(", ")) + '</div>' : '') +
         '<div class="popup-row"><strong>Map context:</strong> ' + esc(mapContextLabel(event)) + '</div>' +
         shakingRows(event) +
-        '<a class="popup-link" href="' + esc(safeUrl(event.officialUrl)) + '" target="_blank" rel="noopener">Open official record</a>' +
+        detailBlock(event) +
+        officialLinks(event) +
         quakeActions(event);
+    }
+
+    // Some official records are human pages and some are raw machine feeds. Sending
+    // a reader to a wall of JSON is not "the official record" in any useful sense,
+    // so the agency's own words are rendered inline and the link points somewhere a
+    // person can actually read.
+    function detailBlock(event) {
+      var detail = event.detail;
+      if (!detail) return "";
+      var rows = "";
+      if (detail.issuedBy) {
+        rows += '<div class="popup-row"><strong>Issued by:</strong> ' + esc(detail.issuedBy) + '</div>';
+      }
+      if (detail.expiresAt) {
+        rows += '<div class="popup-row"><strong>In effect until:</strong> ' + esc(fmt(detail.expiresAt)) + '</div>';
+      }
+      var prose = "";
+      if (detail.headline) prose += '<p class="detail-headline">' + esc(detail.headline) + '</p>';
+      if (detail.summary) prose += '<p>' + esc(detail.summary) + '</p>';
+      if (detail.instruction) {
+        prose += '<p class="detail-instruction"><strong>What to do:</strong> ' + esc(detail.instruction) + '</p>';
+      }
+      if (!rows && !prose) return "";
+      return rows + (prose ? '<div class="popup-detail">' + prose + '</div>' : "");
+    }
+
+    // The human destination per source, chosen because the machine URL is not one.
+    function humanDestination(event) {
+      var point = pointForGeometry(event.geometry);
+      if (event.source === "nws_alerts" && point) {
+        // NWS publishes no per-alert page — every alert's own "web" field is the
+        // literal string "http://www.weather.gov". Its point-forecast page is the
+        // real place: it lists the active hazards for that spot plus the forecast.
+        return {
+          url:"https://forecast.weather.gov/MapClick.php?lat=" + point[0].toFixed(4) +
+            "&lon=" + point[1].toFixed(4),
+          label:"NWS forecast and active hazards for this area"
+        };
+      }
+      if (event.source.indexOf("swpc_") === 0) {
+        return { url:"https://www.swpc.noaa.gov/products/planetary-k-index", label:"NOAA SWPC space-weather dashboard" };
+      }
+      if (event.source.indexOf("tsunami_") === 0) {
+        return { url:"https://www.tsunami.gov/", label:"NOAA Tsunami Warning Center" };
+      }
+      return null;
+    }
+
+    // Anywhere a bare title or row is a link, it must land somewhere readable.
+    function readableLink(event) {
+      var human = humanDestination(event);
+      // Both branches go through safeUrl so every href on the page is checked in
+      // one place, even the ones this file builds itself.
+      return safeUrl(human ? human.url : event.officialUrl);
+    }
+
+    function officialLinks(event) {
+      var human = humanDestination(event);
+      var raw = safeUrl(event.officialUrl);
+      var links = "";
+      if (human) {
+        links += '<a class="popup-link" href="' + esc(safeUrl(human.url)) + '" target="_blank" rel="noopener">' +
+          esc(human.label) + '</a>';
+        // Kept, but labelled for what it is rather than promoted as the record.
+        if (raw !== "#") {
+          links += '<a class="popup-link secondary" href="' + esc(raw) + '" target="_blank" rel="noopener">' +
+            'Raw ' + esc(event.sourceLabel) + ' record (JSON)</a>';
+        }
+        return links;
+      }
+      return '<a class="popup-link" href="' + esc(raw) + '" target="_blank" rel="noopener">Open official record</a>';
     }
 
     function shakingRows(event) {
@@ -1989,7 +2125,7 @@ ${solarClientSource()}
       document.getElementById("contextCount").textContent = String(items.length);
       document.getElementById("contextSignals").innerHTML = items.length ? items.slice(0,8).map(function(event) {
         var color = colors[event.family] || "#697B73";
-        return '<a class="signal" href="' + esc(safeUrl(event.officialUrl)) + '" target="_blank" rel="noopener">' +
+        return '<a class="signal" href="' + esc(readableLink(event)) + '" target="_blank" rel="noopener">' +
           '<span class="signal-bar" style="--signal:' + color + '"></span>' +
           '<span><span class="signal-name">' + esc(event.title) + '</span><span class="signal-meta">' + esc(event.sourceLabel) + ' · ' + esc(relative(event.eventTime)) + ' · map ' + esc(mapContextLabel(event)) + ' · alert gate ' + esc(event.staleGateResult) + '</span></span>' +
           '<span class="signal-score">' + esc(event.score) + '</span></a>';
@@ -2003,7 +2139,7 @@ ${solarClientSource()}
       }
       document.getElementById("notablePeriod").textContent = item.periodLabel;
       document.getElementById("notable").innerHTML =
-        '<a class="notable-title" href="' + esc(safeUrl(item.event.officialUrl)) + '" target="_blank" rel="noopener">' + esc(item.event.title) + '</a>' +
+        '<a class="notable-title" href="' + esc(readableLink(item.event)) + '" target="_blank" rel="noopener">' + esc(item.event.title) + '</a>' +
         '<div class="notable-meta">' + esc(item.event.sourceLabel) + ' · ' + esc(fmt(item.occurredAt)) + '</div>' +
         '<div class="scoreline"><span class="score">' + esc(item.score) + '/100</span><span class="score">' +
         (item.comparableCount === 1 ? 'only record' : esc(item.rarityPercentile) + 'th percentile') + '</span></div>' +

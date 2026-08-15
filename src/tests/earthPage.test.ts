@@ -51,6 +51,15 @@ describe("earthWatchHtml script integrity", () => {
     expect(html).not.toContain("</html>`");
   });
 
+  it("contains no backtick anywhere inside the page source", () => {
+    // This has bitten twice. The first time it produced code that COMPILED, so
+    // typecheck said nothing; the second time it happened to be a hard syntax
+    // error and tsc caught it. Relying on which of those two you get is luck, so
+    // assert the property directly: prose in this file uses quotes, never
+    // backticks, and a stray one fails here regardless of how it parses.
+    expect(html).not.toContain("`");
+  });
+
   it("embeds the solar module rather than a hand-copied second implementation", () => {
     // If these ever diverged, the map would shade night by different maths than the
     // tests verify. Assert the shipped bytes are the module's own serialisation.
@@ -115,5 +124,36 @@ describe("earthWatchHtml honesty of claims", () => {
 
   it("reports absent felt data as none received rather than as zero", () => {
     expect(html).toContain("none received by USGS");
+  });
+
+  it("sends readers to a human page, not a machine feed", () => {
+    // NWS and SWPC "official records" are raw JSON. Every place the page renders a
+    // link has to route through the same resolver, or one of them quietly keeps
+    // dumping a reader into an API response.
+    expect(html).toContain("forecast.weather.gov/MapClick.php");
+    expect(html).toContain("swpc.noaa.gov/products/planetary-k-index");
+    expect(html).toContain("function humanDestination");
+    expect(html).toContain("function readableLink");
+    // The raw feed stays reachable, but labelled as what it is.
+    expect(html).toContain("record (JSON)");
+  });
+
+  it("never puts a raw officialUrl into an href without sanitising it", () => {
+    // The invariant that actually matters, stated directly rather than by pattern
+    // matching the call shape: officialUrl is attacker-adjacent (it comes from a
+    // third-party feed) and must always pass through safeUrl or readableLink.
+    // Written this way because the first version of this test flagged two call
+    // sites that WERE sanitised, just through a local variable.
+    const rawInHref = html.match(/href="'\s*\+\s*esc\([^)]*officialUrl/g) ?? [];
+    expect(rawInHref).toEqual([]);
+
+    // And the local that does carry it is assigned from the sanitiser.
+    expect(html).toContain("var raw = safeUrl(event.officialUrl);");
+  });
+
+  it("keeps safeUrl refusing anything that is not https", () => {
+    // If safeUrl ever stopped being the gate, the test above would still pass
+    // while protecting nothing.
+    expect(html).toContain('return url.protocol === "https:" ? url.href : "#";');
   });
 });

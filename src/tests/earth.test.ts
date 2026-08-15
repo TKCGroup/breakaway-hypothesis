@@ -546,6 +546,123 @@ const USGS_UNREPORTED_PROPERTIES = {
   title: "M 2.0 - 6 km E of Clam Gulch, Alaska"
 };
 
+/**
+ * Verbatim `properties` from a live api.weather.gov active alert on 2026-08-14,
+ * newlines and all. The description arrives hard-wrapped mid-sentence, which is
+ * exactly the shape the popup has to survive — a fixture with tidy prose would
+ * test a payload NWS never sends.
+ */
+const NWS_ALERT_PROPERTIES = {
+  "@id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.ea9d6ca966da13a31b954a804353427ddbd4ac4b.002.1",
+  id: "urn:oid:2.49.0.1.840.0.ea9d6ca966da13a31b954a804353427ddbd4ac4b.002.1",
+  areaDesc: "Knox; Stark; Peoria; Marshall; Woodford; Fulton; Tazewell; McLean",
+  sent: "2026-08-14T21:41:00-05:00",
+  effective: "2026-08-14T21:41:00-05:00",
+  onset: "2026-08-14T22:00:00-05:00",
+  expires: "2026-08-15T10:00:00-05:00",
+  status: "Actual",
+  messageType: "Update",
+  severity: "Severe",
+  certainty: "Possible",
+  urgency: "Future",
+  event: "Flood Watch",
+  sender: "w-nws.webmaster@noaa.gov",
+  senderName: "NWS Lincoln IL",
+  headline:
+    "Flood Watch issued August 14 at 9:41PM CDT until August 15 at 10:00AM CDT by NWS Lincoln IL",
+  description:
+    "* WHAT...Flooding caused by excessive rainfall continues to be\npossible.\n\n* WHERE...Portions of central and west central Illinois.",
+  instruction:
+    "You should monitor later forecasts and be alert for possible Flood\nWarnings.",
+  response: "Monitor",
+  // Every NWS alert carries this literal value. It is why "open the official
+  // record" had to stop meaning "open the machine feed".
+  web: "http://www.weather.gov"
+};
+
+describe("Earth Watch event detail", () => {
+  function alertEvent(rawProperties: unknown) {
+    const snapshot = emptySnapshot();
+    snapshot.events = [
+      eventFixture({
+        id: "alert",
+        source: "nws_alerts",
+        externalId: "alert",
+        eventType: "weather_alert",
+        title: "Flood Watch: Knox; Stark; Peoria",
+        magnitude: undefined,
+        depthKm: undefined,
+        region: undefined,
+        body: "Flood Watch issued August 14 at 9:41PM CDT",
+        rawJson: { properties: rawProperties }
+      })
+    ];
+    return buildEarthWatchData(snapshot, DEFAULT_CONFIG, NOW).map.events.find(
+      (event) => event.id === "alert"
+    )!;
+  }
+
+  it("lifts the agency's own words out of the stored alert", () => {
+    const detail = alertEvent(NWS_ALERT_PROPERTIES).detail!;
+    expect(detail.headline).toContain("Flood Watch issued August 14");
+    expect(detail.summary).toContain("WHAT...Flooding caused by excessive rainfall");
+    expect(detail.instruction).toContain("monitor later forecasts");
+    expect(detail.issuedBy).toBe("NWS Lincoln IL");
+    expect(detail.expiresAt).toBe(new Date("2026-08-15T10:00:00-05:00").toISOString());
+  });
+
+  it("does not repeat the headline as the summary when they are the same string", () => {
+    // The real NWS case: the normaliser sets `body` to the headline, so with no
+    // `description` in the payload both fields resolve to the identical sentence
+    // and the popup would print it twice in a row.
+    const headline = "Flood Watch issued August 14 at 9:41PM CDT";
+    const snapshot = emptySnapshot();
+    snapshot.events = [
+      eventFixture({
+        id: "dup",
+        source: "nws_alerts",
+        externalId: "dup",
+        eventType: "weather_alert",
+        magnitude: undefined,
+        region: undefined,
+        body: headline,
+        rawJson: { properties: { headline } }
+      })
+    ];
+    const detail = buildEarthWatchData(snapshot, DEFAULT_CONFIG, NOW).map.events.find(
+      (event) => event.id === "dup"
+    )!.detail!;
+    expect(detail.headline).toBe(headline);
+    expect(detail.summary).toBeUndefined();
+  });
+
+  it("emits no detail block at all when the agency published nothing", () => {
+    const snapshot = emptySnapshot();
+    snapshot.events = [
+      eventFixture({ id: "bare", externalId: "bare", body: undefined, rawJson: {} })
+    ];
+    const event = buildEarthWatchData(snapshot, DEFAULT_CONFIG, NOW).map.events.find(
+      (candidate) => candidate.id === "bare"
+    )!;
+    expect(event.detail).toBeUndefined();
+  });
+
+  it("ignores blank and non-string fields rather than rendering empty rows", () => {
+    const detail = alertEvent({
+      headline: "   ",
+      description: "",
+      instruction: 42,
+      senderName: null,
+      expires: "not-a-date",
+      // eventFixture supplies a body, so a summary still survives; the point is
+      // that none of the junk above becomes a rendered row.
+    }).detail;
+    expect(detail?.instruction).toBeUndefined();
+    expect(detail?.issuedBy).toBeUndefined();
+    expect(detail?.expiresAt).toBeUndefined();
+  });
+});
+
 describe("Earth Watch shaking, antipodes, and felt rings", () => {
   function quakeWith(rawProperties: unknown, overrides = {}) {
     const snapshot = emptySnapshot();
