@@ -126,6 +126,42 @@ describe("earthWatchHtml honesty of claims", () => {
     expect(html).toContain("none received by USGS");
   });
 
+  it("gives an earthquake a population reference, a depth, and a run-up chart", () => {
+    // A magnitude on its own does not say whether an event matters. All three of
+    // these exist to answer "compared to what?", so all three are pinned.
+    expect(html).toContain("Nearest major population:");
+    expect(html).toContain("Nearest town:");
+    expect(html).toContain("<strong>Depth:</strong>");
+    expect(html).toContain("Seismic run-up");
+    expect(html).toContain("function loadSparkline");
+  });
+
+  it("builds the run-up chart from a fresh catalogue query, not from this map", () => {
+    // The map payload is a scored, capped selection. Counting it would under-report
+    // activity and could render a flat run-up where there was actually a swarm.
+    // The disclosure itself rides on the API's `map.method` string, which the page
+    // renders at runtime; earth.test.ts asserts that half.
+    expect(html).toContain("fdsnws/event/1/query");
+    expect(html).toContain("maxradiuskm");
+  });
+
+  it("says a sparse chart may be a sparse network rather than a quiet region", () => {
+    // Detection capability differs by country, so comparing two regions' charts is
+    // not comparing their seismicity. Without this the chart invites a wrong read.
+    expect(html).toContain("a quiet region or a sparse network");
+  });
+
+  it("distinguishes no catalogued quakes from a failed query", () => {
+    // An empty chart and a broken fetch look identical, and the empty one reads as
+    // reassurance. They must say different things.
+    expect(html).toContain("No catalogued quakes M");
+    expect(html).toContain("USGS catalogue unavailable");
+  });
+
+  it("credits GeoNames, whose licence requires it", () => {
+    expect(html).toContain("GeoNames (CC BY 4.0)");
+  });
+
   it("sends readers to a human page, not a machine feed", () => {
     // NWS and SWPC "official records" are raw JSON. Every place the page renders a
     // link has to route through the same resolver, or one of them quietly keeps

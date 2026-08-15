@@ -721,6 +721,51 @@ describe("Earth Watch shaking, antipodes, and felt rings", () => {
     expect(event.antipode![1]).toBeCloseTo(58.24, 6);
   });
 
+  it("answers how far the quake was from people", () => {
+    // eventFixture sits at 46.84N 121.76W, on Mount Rainier. The nearest town and
+    // the nearest major population are both real places in Washington state, and
+    // the major one must be the further of the two.
+    const event = quakeWith(USGS_FELT_PROPERTIES);
+    expect(event.population?.nearest).toBeDefined();
+    expect(event.population!.nearest!.country).toBe("United States");
+    expect(event.population!.nearest!.distanceKm).toBeGreaterThan(0);
+    expect(event.population!.nearest!.population).toBeGreaterThanOrEqual(50_000);
+    if (event.population!.major) {
+      expect(event.population!.major.population).toBeGreaterThanOrEqual(250_000);
+      expect(event.population!.major.distanceKm).toBeGreaterThanOrEqual(
+        event.population!.nearest!.distanceKm
+      );
+    }
+  });
+
+  it("discloses both new data sources in the published method string", () => {
+    // The page renders `map.method` verbatim as its disclosed method. GeoNames is
+    // CC BY 4.0 so the credit is a licence obligation, and stating that the run-up
+    // chart does NOT come from this map's own selection matters because the payload
+    // is a capped, scored subset that would under-report activity.
+    const method = buildEarthWatchData(emptySnapshot(), DEFAULT_CONFIG, NOW).map.method;
+    expect(method).toContain("GeoNames (CC BY 4.0)");
+    expect(method).toContain("not drawn from this map");
+  });
+
+  it("does not attach a population reference to a hazard with no epicentre", () => {
+    const snapshot = emptySnapshot();
+    snapshot.events = [
+      eventFixture({
+        id: "nowhere",
+        externalId: "nowhere",
+        lat: undefined,
+        lon: undefined,
+        region: undefined
+      })
+    ];
+    const event = buildEarthWatchData(snapshot, DEFAULT_CONFIG, NOW).map.events.find(
+      (candidate) => candidate.id === "nowhere"
+    );
+    // No geometry means it is not a mapped event at all; nothing should be invented.
+    expect(event?.population).toBeUndefined();
+  });
+
   it("gives earthquakes modeled rings and gives other hazards none", () => {
     expect(quakeWith(USGS_FELT_PROPERTIES).feltRings!.length).toBeGreaterThan(0);
 

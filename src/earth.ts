@@ -14,6 +14,11 @@ import {
   type FeltRing,
   MODEL_MAX_DISTANCE_KM
 } from "./logic/feltRadius.js";
+import {
+  CITY_ATTRIBUTION,
+  nearestPopulation,
+  type NearestPopulation
+} from "./logic/nearestCity.js";
 import { solarClientSource } from "./logic/solar.js";
 import { evaluateStaleGate } from "./logic/staleGate.js";
 import type {
@@ -76,6 +81,11 @@ export interface EarthMapEvent {
   feltRings?: FeltRing[];
   /** The issuing agency's own words about this event, when it published any. */
   detail?: EarthEventDetail;
+  /**
+   * How far this was from people. A magnitude on its own cannot distinguish an
+   * M7.7 under open ocean from an M7.7 under a city; this is the missing half.
+   */
+  population?: NearestPopulation;
 }
 
 /**
@@ -237,7 +247,8 @@ export function buildEarthWatchData(
       coverage:
         "The initial viewport follows the strongest eligible global official-signal cluster, with a United States fallback when no active signal qualifies.",
       method:
-        "Heat indicates eligible official signal load, not disaster probability. Earthquake map context persists by magnitude (under M4: 2h; M4-M5: 24h; M6: 72h; M7+: 7d) without changing the hard notification stale gate.",
+        "Heat indicates eligible official signal load, not disaster probability. Earthquake map context persists by magnitude (under M4: 2h; M4-M5: 24h; M6: 72h; M7+: 7d) without changing the hard notification stale gate. " +
+        "Distance-to-population is computed from " + CITY_ATTRIBUTION + "; the seismic run-up chart queries the USGS catalogue directly and is not drawn from this map's own selection.",
       events: spatialEvents,
       nonSpatialSignals,
       regions: earthMapRegions(config.regions, dashboard.regions),
@@ -448,6 +459,10 @@ function earthMapEvent(
     antipode: antipodeOf(event),
     shaking: shakingReport(event),
     detail: eventDetail(event),
+    population:
+      family === "earthquake" && validMapPoint(event.lat ?? Number.NaN, event.lon ?? Number.NaN)
+        ? nearestPopulation(event.lat as number, event.lon as number)
+        : undefined,
     feltRings:
       family === "earthquake" && Number.isFinite(event.magnitude)
         ? feltRings(event.magnitude, event.depthKm)
@@ -1228,6 +1243,7 @@ export function earthWatchHtml(): string {
     .err.on { display:block; }
     .leaflet-container { font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; }
     .leaflet-popup-content { min-width:230px; }
+    .leaflet-popup-content { max-height:min(62vh,520px); overflow-y:auto; }
     .popup-title { font-weight:750; line-height:1.3; margin-bottom:6px; }
     .popup-row { font-size:11px; color:var(--muted); margin-top:3px; }
     .popup-row strong { color:var(--ink); }
@@ -1242,6 +1258,27 @@ export function earthWatchHtml(): string {
     .popup-detail p:last-child { margin-bottom:0; }
     .detail-headline { font-weight:700; color:var(--ink); }
     .detail-instruction { border-top:1px solid var(--hair); padding-top:7px; }
+
+    .spark-wrap { margin-top:10px; padding-top:9px; border-top:1px solid var(--hair); }
+    .spark-head {
+      display:flex; justify-content:space-between; align-items:baseline; gap:8px;
+      font-family:"Barlow Condensed",sans-serif; text-transform:uppercase; letter-spacing:.07em;
+      font-size:11.5px; font-weight:600; color:var(--muted);
+    }
+    .spark-head .mono { font-size:10px; letter-spacing:.02em; }
+    .spark-bars {
+      display:flex; align-items:flex-end; gap:1.5px; height:42px; margin-top:6px;
+      padding:0 1px; border-bottom:1px solid var(--hair);
+    }
+    .spark-bar { flex:1; min-width:2px; background:#9BB2C4; border-radius:1px 1px 0 0; }
+    .spark-bar.recent { background:#DE5F26; }
+    .spark-bar.self { flex:0 0 4px; background:#BE2618; }
+    .spark-axis {
+      display:flex; justify-content:space-between; margin-top:3px;
+      font-family:"IBM Plex Mono",monospace; font-size:9.5px; color:var(--muted);
+    }
+    .spark-note { margin-top:6px; font-size:10.5px; color:var(--muted); line-height:1.45; }
+    .spark-note em { font-style:normal; opacity:.85; }
     body.map-fs { overflow:hidden; }
     .map-card.fs { position:fixed; inset:0; z-index:2000; border:0; border-radius:0; }
     .map-card.fs #map { height:100vh; height:100dvh; }
@@ -1425,7 +1462,7 @@ export function earthWatchHtml(): string {
 
     <footer>
       <div>Official-source situational awareness. Report-only. earth.tkcgroup.co</div>
-      <div class="mono">USGS · NOAA/NWS · NOAA/SWPC · NASA · NOAA Tsunami</div>
+      <div class="mono">USGS · NOAA/NWS · NOAA/SWPC · NASA · NOAA Tsunami · GeoNames (CC BY 4.0)</div>
     </footer>
   </div>
 
@@ -1458,7 +1495,7 @@ ${solarClientSource()}
       data:null, window:"now", hazard:"all", source:"all", sort:"score",
       layerById:{}, focusApplied:false, view:"map",
       dayNight:true, antipodes:false, spin:true,
-      feltEventId:null, feltSource:null, shakeMapCache:{}
+      feltEventId:null, feltSource:null, shakeMapCache:{}, sparkCache:{}
     };
     try {
       var storedSort = localStorage.getItem("earthWatch.signalSort");
@@ -1592,7 +1629,10 @@ ${solarClientSource()}
         '<div class="popup-row"><strong>Notification stale gate:</strong> ' + esc(event.staleGateResult) + '</div>' +
         (event.staleGateReasons.length ? '<div class="popup-row"><strong>Notification blocked by:</strong> ' + esc(event.staleGateReasons.join(", ")) + '</div>' : '') +
         '<div class="popup-row"><strong>Map context:</strong> ' + esc(mapContextLabel(event)) + '</div>' +
+        quakeSizeRows(event) +
+        populationRows(event) +
         shakingRows(event) +
+        sparklineBlock(event) +
         detailBlock(event) +
         officialLinks(event) +
         quakeActions(event);
@@ -1667,6 +1707,150 @@ ${solarClientSource()}
         return links;
       }
       return '<a class="popup-link" href="' + esc(raw) + '" target="_blank" rel="noopener">Open official record</a>';
+    }
+
+    function formatNumber(value) {
+      return Number(value).toLocaleString("en-US");
+    }
+
+    // Magnitude and depth together. A shallow M6 does far more at the surface than
+    // a deep M7, so the two numbers only mean something side by side.
+    function quakeSizeRows(event) {
+      if (event.family !== "earthquake") return "";
+      var rows = "";
+      if (Number.isFinite(event.magnitude)) {
+        rows += '<div class="popup-row"><strong>Magnitude:</strong> M' +
+          esc(Number(event.magnitude).toFixed(1)) + '</div>';
+      }
+      if (Number.isFinite(event.depthKm)) {
+        var depth = Number(event.depthKm);
+        var band = depth < 70 ? "shallow" : depth < 300 ? "intermediate" : "deep";
+        rows += '<div class="popup-row"><strong>Depth:</strong> ' +
+          esc(depth < 10 ? depth.toFixed(1) : String(Math.round(depth))) + ' km (' + band + ')' +
+          '</div>';
+      }
+      return rows;
+    }
+
+    // The reference point a magnitude does not give you.
+    function populationRows(event) {
+      var population = event.population;
+      if (!population) return "";
+      var rows = "";
+      if (population.nearest) {
+        rows += '<div class="popup-row"><strong>Nearest town:</strong> ' + cityPhrase(population.nearest) + '</div>';
+      }
+      if (population.major) {
+        rows += '<div class="popup-row"><strong>Nearest major population:</strong> ' + cityPhrase(population.major) + '</div>';
+      }
+      return rows;
+    }
+
+    function cityPhrase(city) {
+      return esc(city.name) + ', ' + esc(city.country) +
+        ' &mdash; pop. ' + esc(formatNumber(city.population)) +
+        ', ' + esc(formatNumber(city.distanceKm)) + ' km ' + esc(city.bearing);
+    }
+
+    // ---- Foreshock / swarm sparkline ----------------------------------------
+    // Built from a fresh USGS catalogue query rather than from the events already on
+    // this map: the map payload is a scored, capped selection, so counting it would
+    // under-report activity and could show a flat run-up where there was a swarm.
+    var SPARK_WINDOW_DAYS = 90;
+    var SPARK_RADIUS_KM = 300;
+    var SPARK_MIN_MAGNITUDE = 2.5;
+    var SPARK_BUCKETS = 30;
+
+    function sparklineBlock(event) {
+      if (event.family !== "earthquake") return "";
+      var point = pointForGeometry(event.geometry);
+      if (!point) return "";
+      var entry = state.sparkCache[event.id];
+      if (!entry) {
+        return '<div class="spark-wrap" data-spark-for="' + esc(event.id) + '">' +
+          '<div class="spark-head"><span>Seismic run-up</span><span class="mono">loading</span></div>' +
+          '<div class="spark-note">Querying the USGS catalogue for the ' + SPARK_WINDOW_DAYS +
+          ' days before this event, within ' + SPARK_RADIUS_KM + ' km...</div></div>';
+      }
+      if (entry.error) {
+        return '<div class="spark-wrap"><div class="spark-head"><span>Seismic run-up</span></div>' +
+          '<div class="spark-note">USGS catalogue unavailable (' + esc(entry.error) + '). ' +
+          'No run-up is shown rather than an empty chart that would read as quiet.</div></div>';
+      }
+      return renderSpark(event, entry);
+    }
+
+    function renderSpark(event, entry) {
+      var quakes = entry.quakes;
+      var eventTime = Date.parse(event.eventTime);
+      var start = eventTime - SPARK_WINDOW_DAYS * 86400000;
+      var buckets = [];
+      for (var i = 0; i < SPARK_BUCKETS; i += 1) buckets.push({ count:0, maxMag:0 });
+      quakes.forEach(function(quake) {
+        var index = Math.floor(((quake.time - start) / (eventTime - start)) * SPARK_BUCKETS);
+        if (index < 0 || index >= SPARK_BUCKETS) return;
+        buckets[index].count += 1;
+        if (quake.mag > buckets[index].maxMag) buckets[index].maxMag = quake.mag;
+      });
+      var peak = Math.max(1, Math.max.apply(null, buckets.map(function(b){ return b.maxMag; })));
+      var bars = buckets.map(function(bucket, index) {
+        var height = bucket.count ? Math.max(9, Math.round((bucket.maxMag / peak) * 100)) : 0;
+        var recent = index >= SPARK_BUCKETS - 3;
+        return '<span class="spark-bar' + (recent ? ' recent' : '') + '" style="height:' + height + '%" ' +
+          'title="' + esc(bucket.count + (bucket.count === 1 ? " quake" : " quakes") +
+            (bucket.maxMag ? ", strongest M" + bucket.maxMag.toFixed(1) : "")) + '"></span>';
+      }).join("");
+
+      var strongest = quakes.reduce(function(best, quake) {
+        return quake.mag > (best ? best.mag : -Infinity) ? quake : best;
+      }, null);
+      var summary = quakes.length
+        ? formatNumber(quakes.length) + ' quakes M' + SPARK_MIN_MAGNITUDE + '+ within ' +
+          SPARK_RADIUS_KM + ' km in the ' + SPARK_WINDOW_DAYS + ' days before' +
+          (strongest ? ', strongest M' + strongest.mag.toFixed(1) : '')
+        : 'No catalogued quakes M' + SPARK_MIN_MAGNITUDE + '+ within ' + SPARK_RADIUS_KM +
+          ' km in the ' + SPARK_WINDOW_DAYS + ' days before';
+
+      return '<div class="spark-wrap">' +
+        '<div class="spark-head"><span>Seismic run-up</span>' +
+        '<span class="mono">' + SPARK_WINDOW_DAYS + 'd &middot; ' + SPARK_RADIUS_KM + 'km</span></div>' +
+        '<div class="spark-bars" role="img" aria-label="' + esc(summary) + '">' + bars +
+        '<span class="spark-bar self" style="height:100%" title="' + esc("This event, M" + Number(event.magnitude || 0).toFixed(1)) + '"></span></div>' +
+        '<div class="spark-axis"><span>' + SPARK_WINDOW_DAYS + ' days before</span><span>this event</span></div>' +
+        '<div class="spark-note">' + esc(summary) + '. Bar height is the strongest magnitude in that ' +
+        'interval, not the count. ' +
+        '<em>A sparse chart can mean a quiet region or a sparse network &mdash; detection differs by country, ' +
+        'so read the shape here, not across regions.</em></div>' +
+        '</div>';
+    }
+
+    async function loadSparkline(event) {
+      var point = pointForGeometry(event.geometry);
+      if (!point) return;
+      var eventTime = Date.parse(event.eventTime);
+      var start = new Date(eventTime - SPARK_WINDOW_DAYS * 86400000).toISOString();
+      var end = new Date(eventTime).toISOString();
+      var url = "https://earthquake.usgs.gov/fdsnws/event/1/query?format=geojson" +
+        "&latitude=" + point[0].toFixed(4) + "&longitude=" + point[1].toFixed(4) +
+        "&maxradiuskm=" + SPARK_RADIUS_KM +
+        "&starttime=" + encodeURIComponent(start) + "&endtime=" + encodeURIComponent(end) +
+        "&minmagnitude=" + SPARK_MIN_MAGNITUDE + "&orderby=time&limit=2000";
+      try {
+        var response = await fetch(url);
+        if (!response.ok) throw new Error("HTTP " + response.status);
+        var data = await response.json();
+        var quakes = (data.features || []).map(function(feature) {
+          return { time:Number(feature.properties.time), mag:Number(feature.properties.mag) };
+        }).filter(function(quake) {
+          // Drop the event itself and anything without a usable magnitude; the
+          // event gets its own highlighted bar at the right-hand end.
+          return Number.isFinite(quake.time) && Number.isFinite(quake.mag) && quake.time < eventTime;
+        });
+        state.sparkCache[event.id] = { quakes:quakes };
+      } catch (error) {
+        state.sparkCache[event.id] = { error:(error && error.message) ? error.message : String(error) };
+      }
+      refreshOpenPopup();
     }
 
     function shakingRows(event) {
@@ -2295,6 +2479,17 @@ ${solarClientSource()}
       if (state.dayNight) renderTerminator();
       syncGlobeSettings();
     },60*1000);
+
+    // The run-up chart is fetched on demand, once per event, when its popup opens.
+    map.on("popupopen", function(popupEvent) {
+      var source = popupEvent.popup && popupEvent.popup._source;
+      var id = source && source._earthEventId;
+      if (!id || !state.data) return;
+      var event = state.data.map.events.find(function(candidate) { return candidate.id === id; });
+      if (!event || event.family !== "earthquake") return;
+      if (state.sparkCache[event.id]) return;
+      loadSparkline(event);
+    });
 
     document.getElementById("resetFocus").addEventListener("click",applyDefaultFocus);
     document.getElementById("locate").addEventListener("click",function() {
