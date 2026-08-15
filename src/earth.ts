@@ -1313,12 +1313,38 @@ export function earthWatchHtml(): string {
     .score {
       border:1px solid var(--hair); border-radius:3px; padding:4px 8px; font-family:"IBM Plex Mono",monospace; font-size:11px;
     }
+
+    /* Hazard pills. Same visual family as the .score chips on the notable card,
+       but these are controls: they toggle, they carry a live count, and they show
+       the family colour they filter to. */
+    .hazard-pills { display:flex; gap:6px; flex-wrap:wrap; margin:9px 0 2px; }
+    .hz {
+      display:inline-flex; align-items:center; gap:5px;
+      border:1px solid var(--hair); border-radius:3px; padding:4px 8px;
+      font-family:"IBM Plex Mono",monospace; font-size:11px;
+      background:var(--panel); color:var(--muted); cursor:pointer; line-height:1.2;
+    }
+    .hz svg { width:12px; height:12px; display:block; flex:0 0 auto; }
+    .hz .hz-ico { color:var(--hz,#697B73); }
+    .hz .hz-n { font-variant-numeric:tabular-nums; opacity:.7; }
+    .hz:hover { border-color:var(--hz,var(--ink)); color:var(--ink); }
+    .hz[aria-pressed="true"] {
+      color:var(--ink); border-color:var(--hz,var(--ink)); font-weight:600;
+      box-shadow:inset 0 0 0 1px var(--hz,var(--ink));
+    }
+    .hz[data-empty="true"] { opacity:.45; }
+    .hz.hz-all { --hz:var(--ink); }
     .signals { display:grid; gap:0; margin-top:5px; }
     .signal {
       width:100%; display:grid; grid-template-columns:7px minmax(0,1fr) auto; gap:9px;
       text-align:left; padding:9px 0; border:0; border-bottom:1px dashed var(--hair);
       background:transparent; color:var(--ink); cursor:pointer; text-decoration:none;
-      font:inherit; align-items:start;
+      font:inherit;
+      /* stretch, explicitly: the family colour bar is an empty span whose only
+         height comes from the grid row stretching. Aligning the row to its start
+         instead collapsed the bar to nothing and silently removed the colour
+         coding from every signal row. A test pins this. */
+      align-items:stretch;
     }
     .alert-notice {
       display:none; margin-top:9px; padding:9px 11px; font-size:12px; line-height:1.45;
@@ -1451,17 +1477,9 @@ export function earthWatchHtml(): string {
         <button type="button" data-window="7d">7d</button>
         <button type="button" data-window="30d">30d</button>
         <button type="button" data-window="forecast">Forecast</button>
+        <button type="button" data-window="all">Everything</button>
       </div>
       <div class="control-actions">
-        <select id="hazardFilter" class="field" aria-label="Hazard layer">
-          <option value="all">All hazard families</option>
-          <option value="earthquake">Earthquakes</option>
-          <option value="weather">Severe weather</option>
-          <option value="natural">Natural events</option>
-          <option value="volcano">Volcanoes</option>
-          <option value="tsunami">Tsunami</option>
-          <option value="space_weather">Space weather</option>
-        </select>
         <select id="sourceFilter" class="field" aria-label="Official source">
           <option value="all">All official sources</option>
           <option value="usgs">USGS</option>
@@ -1474,6 +1492,8 @@ export function earthWatchHtml(): string {
         <button type="button" class="pbtn" id="locate">Use my location</button>
       </div>
     </div>
+
+    <div class="hazard-pills" id="hazardPills" role="group" aria-label="Hazard families"></div>
 
     <div class="controls" style="margin-top:10px">
       <div class="segmented" aria-label="Map projection">
@@ -1632,7 +1652,7 @@ ${solarClientSource()}
     "use strict";
     var solar = window.__earthSolar;
     var state = {
-      data:null, window:"now", hazard:"all", source:"all", sort:"score",
+      data:null, window:"now", hazards:[], source:"all", sort:"score",
       layerById:{}, focusApplied:false, view:"map",
       dayNight:true, antipodes:false, spin:true,
       feltEventId:null, feltSource:null, shakeMapCache:{}, sparkCache:{},
@@ -1744,15 +1764,113 @@ ${solarClientSource()}
       if (state.window === "7d") return now - 7*86400000;
       return now - 30*86400000;
     }
+    // ─────────────────────────────────────────────────────────────────────────
+    // Hazard families
+    //
+    // These were a single-select dropdown, which could ask for one family or all
+    // of them and nothing in between. As pills they are independent toggles, so
+    // "earthquakes and volcanoes but not the 672 weather alerts" is now sayable.
+    //
+    // The icons are stencils rather than emoji: emoji render differently on every
+    // platform and carry their own colour, which would fight the family colour
+    // these pills exist to show.
+    // ─────────────────────────────────────────────────────────────────────────
+    var HAZARD_FAMILIES = [
+      {key:"earthquake",    label:"Earthquake"},
+      {key:"weather",       label:"Severe weather"},
+      {key:"volcano",       label:"Volcano"},
+      {key:"tsunami",       label:"Tsunami"},
+      {key:"natural",       label:"Natural event"},
+      {key:"space_weather", label:"Space weather"}
+    ];
+
+    function hazardIcon(key) {
+      var open = '<svg class="hz-ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" ' +
+        'stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">';
+      var paths = {
+        // A seismogram trace.
+        earthquake:'<path d="M1 8h2.2l1.6-4.6L7 12.6l2-7.2 1.5 4.4L12 8h3"/>',
+        // Cloud with a bolt through it.
+        weather:'<path d="M4.4 11a2.9 2.9 0 0 1 .3-5.8 3.9 3.9 0 0 1 7.4.9A2.6 2.6 0 0 1 12 11"/><path d="M8.6 8.4 6.9 11.6h2.2L7.4 15"/>',
+        // Cone with a vent plume.
+        volcano:'<path d="M1.6 14h12.8L10.4 6H5.6L1.6 14Z"/><path d="M6.6 6 8 2.2 9.4 6"/><path d="M11.6 3.2 12.8 1.6M4.4 3.2 3.2 1.6"/>',
+        // A wave crest over water lines.
+        tsunami:'<path d="M1 11.4c2.2-5.6 6-8.2 9.2-6.6 2 1 2.6 3 1.6 4.4-.8 1.1-2.3 1-2.7-.2"/><path d="M1 14.2c1.3 0 1.3-1 2.6-1s1.3 1 2.6 1 1.3-1 2.6-1 1.3 1 2.6 1 1.3-1 2.6-1"/>',
+        // A leaf, for the catch-all natural-event family.
+        natural:'<path d="M13.6 2.4C7.2 2 3 4.6 3 9.2A4.6 4.6 0 0 0 7.6 13.8c4.6 0 6.4-5 6-11.4Z"/><path d="M2.4 14.4 8 8.8"/>',
+        // Sun with flare rays.
+        space_weather:'<circle cx="8" cy="8" r="3.1"/><path d="M8 1v1.8M8 13.2V15M1 8h1.8M13.2 8H15M3.1 3.1l1.3 1.3M11.6 11.6l1.3 1.3M12.9 3.1l-1.3 1.3M4.4 11.6l-1.3 1.3"/>',
+        // Every family, shown as a stack.
+        all:'<path d="M8 1.6 14.6 5 8 8.4 1.4 5 8 1.6Z"/><path d="M1.4 8.4 8 11.8l6.6-3.4"/><path d="M1.4 11.6 8 15l6.6-3.4"/>'
+      };
+      return open + (paths[key] || paths.all) + "</svg>";
+    }
+
+    function hazardSelected(family) {
+      // An empty set means everything, which keeps "no filter" and "all families
+      // ticked" from being two different states that can drift apart.
+      return !state.hazards.length || state.hazards.indexOf(family) !== -1;
+    }
+
+    // The family and source test, without the time window. Counting through the
+    // same predicate the map uses is what stops a pill's number from disagreeing
+    // with what the map draws.
+    function passesWindow(event) {
+      if (state.window === "all") return true;
+      if (state.window === "now") return isActiveMapEvent(event);
+      if (state.window === "forecast") return event.status === "forecast";
+      var occurredAt = Date.parse(event.eventTime);
+      return event.status !== "forecast" && occurredAt >= windowStart() && occurredAt <= Date.now();
+    }
+
+    function renderHazardPills() {
+      var host = document.getElementById("hazardPills");
+      if (!host) return;
+      var counts = {};
+      var inWindow = 0;
+      if (state.data) {
+        state.data.map.events.concat(state.data.map.nonSpatialSignals || []).forEach(function(event) {
+          if (state.source !== "all" && sourceGroup(event.source) !== state.source) return;
+          if (!passesWindow(event)) return;
+          inWindow += 1;
+          counts[event.family] = (counts[event.family] || 0) + 1;
+        });
+      }
+      var html = '<button type="button" class="hz hz-all" data-hazard="all" aria-pressed="' +
+        (state.hazards.length ? "false" : "true") + '">' + hazardIcon("all") +
+        '<span>Everything</span><span class="hz-n">' + inWindow + "</span></button>";
+      HAZARD_FAMILIES.forEach(function(family) {
+        var count = counts[family.key] || 0;
+        var on = state.hazards.indexOf(family.key) !== -1;
+        html += '<button type="button" class="hz" data-hazard="' + family.key +
+          '" style="--hz:' + (colors[family.key] || "#697B73") + '"' +
+          ' aria-pressed="' + (on ? "true" : "false") + '"' +
+          ' data-empty="' + (count === 0 ? "true" : "false") + '"' +
+          ' title="' + esc(family.label) + '">' +
+          hazardIcon(family.key) + "<span>" + esc(family.label) +
+          '</span><span class="hz-n">' + count + "</span></button>";
+      });
+      host.innerHTML = html;
+      Array.prototype.forEach.call(host.querySelectorAll("[data-hazard]"), function(button) {
+        button.addEventListener("click", function() {
+          var key = button.getAttribute("data-hazard");
+          if (key === "all") {
+            state.hazards = [];
+          } else {
+            var at = state.hazards.indexOf(key);
+            if (at === -1) state.hazards.push(key); else state.hazards.splice(at, 1);
+          }
+          renderMap(); renderContext(); renderHazardPills();
+        });
+      });
+    }
+
     function selectedEvents() {
       if (!state.data) return [];
       return state.data.map.events.filter(function(event) {
-        if (state.hazard !== "all" && event.family !== state.hazard) return false;
+        if (!hazardSelected(event.family)) return false;
         if (state.source !== "all" && sourceGroup(event.source) !== state.source) return false;
-        if (state.window === "now") return isActiveMapEvent(event);
-        if (state.window === "forecast") return event.status === "forecast";
-        var occurredAt = Date.parse(event.eventTime);
-        return event.status !== "forecast" && occurredAt >= windowStart() && occurredAt <= Date.now();
+        return passesWindow(event);
       });
     }
     function sourceGroup(source) {
@@ -2411,13 +2529,20 @@ ${solarClientSource()}
         return;
       }
       var rankedEvents = sortSignals(events);
-      container.innerHTML = rankedEvents.slice(0,12).map(function(event) {
+      // The cap used to be 12 with nothing said about it, so the header could
+      // read 740 while the list showed a dozen rows and looked complete. It is
+      // higher now, and when it does bite it says so.
+      var SIGNAL_CAP = 100;
+      container.innerHTML = rankedEvents.slice(0,SIGNAL_CAP).map(function(event) {
         var color = colors[event.family] || "#697B73";
         return '<button class="signal" type="button" data-event-id="' + esc(event.id) + '" title="' + esc(signalTooltip(event)) + '">' +
           '<span class="signal-bar" style="--signal:' + color + '"></span>' +
           '<span><span class="signal-name">' + esc(event.title) + '</span><span class="signal-meta">' + esc(event.sourceLabel) + quakeDetails(event) + ' · ' + esc(relative(event.eventTime)) + ' · map ' + esc(mapContextLabel(event)) + ' · alert gate ' + esc(event.staleGateResult) + '</span></span>' +
           '<span class="signal-score">' + esc(event.score) + '</span></button>';
-      }).join("");
+      }).join("") + (rankedEvents.length > SIGNAL_CAP
+        ? '<div class="empty">Showing the top ' + SIGNAL_CAP + ' of ' + rankedEvents.length +
+          ' signals in this view. Narrow it with the hazard pills or a shorter window.</div>'
+        : "");
       Array.prototype.forEach.call(container.querySelectorAll("[data-event-id]"),function(button) {
         button.addEventListener("click",function() {
           var event = rankedEvents.find(function(candidate){ return candidate.id === button.getAttribute("data-event-id"); });
@@ -2471,12 +2596,9 @@ ${solarClientSource()}
     }
     function renderContext() {
       var items = sortSignals(state.data.map.nonSpatialSignals.filter(function(event) {
-        if (state.hazard !== "all" && event.family !== state.hazard) return false;
+        if (!hazardSelected(event.family)) return false;
         if (state.source !== "all" && sourceGroup(event.source) !== state.source) return false;
-        if (state.window === "now") return isActiveMapEvent(event);
-        if (state.window === "forecast") return event.status === "forecast";
-        var occurredAt = Date.parse(event.eventTime);
-        return event.status !== "forecast" && occurredAt >= windowStart() && occurredAt <= Date.now();
+        return passesWindow(event);
       }));
       document.getElementById("contextCount").textContent = String(items.length);
       // These rows used to be anchors straight to event.officialUrl. For an NWS
@@ -2484,13 +2606,16 @@ ${solarClientSource()}
       // events with no geometry, so humanDestination() — which needs a point —
       // always returned null for exactly the rows that most needed it. The fix is
       // not a better link: it is to go and get the geometry the alert references.
-      document.getElementById("contextSignals").innerHTML = items.length ? items.slice(0,8).map(function(event) {
+      var CONTEXT_CAP = 8;
+      document.getElementById("contextSignals").innerHTML = items.length ? items.slice(0,CONTEXT_CAP).map(function(event) {
         var color = colors[event.family] || "#697B73";
         return '<button type="button" class="signal" data-context-id="' + esc(event.id) + '">' +
           '<span class="signal-bar" style="--signal:' + color + '"></span>' +
           '<span><span class="signal-name">' + esc(event.title) + '</span><span class="signal-meta">' + esc(event.sourceLabel) + ' · ' + esc(relative(event.eventTime)) + ' · map ' + esc(mapContextLabel(event)) + ' · alert gate ' + esc(event.staleGateResult) + '</span></span>' +
           '<span class="signal-score">' + esc(event.score) + '</span></button>';
-      }).join("") : '<div class="empty">No non-spatial signal in this view.</div>';
+      }).join("") + (items.length > CONTEXT_CAP
+        ? '<div class="empty">Showing ' + CONTEXT_CAP + ' of ' + items.length + '.</div>'
+        : "") : '<div class="empty">No non-spatial signal in this view.</div>';
       Array.prototype.forEach.call(
         document.getElementById("contextSignals").querySelectorAll("[data-context-id]"),
         function(button) {
@@ -2645,6 +2770,7 @@ ${solarClientSource()}
       document.getElementById("mapFocus").textContent = data.map.focus.mode === "signal_cluster" ? "Top activity: " + data.map.focus.label + "." : "No eligible global signal; showing the United States fallback.";
       document.getElementById("method").textContent = data.map.method + " " + data.map.coverage;
       renderNotable(); renderSources(); renderRegions(); renderTerminator(); renderMap(); renderContext();
+      renderHazardPills();
     }
 
     // ---- Globe bridge --------------------------------------------------------
@@ -3296,14 +3422,11 @@ ${solarClientSource()}
       button.addEventListener("click",function() {
         state.window = button.getAttribute("data-window");
         Array.prototype.forEach.call(document.querySelectorAll("[data-window]"),function(item){ item.classList.toggle("active",item === button); });
-        renderMap(); renderContext();
+        renderMap(); renderContext(); renderHazardPills();
       });
     });
-    document.getElementById("hazardFilter").addEventListener("change",function(event) {
-      state.hazard = event.target.value; renderMap(); renderContext();
-    });
     document.getElementById("sourceFilter").addEventListener("change",function(event) {
-      state.source = event.target.value; renderMap(); renderContext();
+      state.source = event.target.value; renderMap(); renderContext(); renderHazardPills();
     });
     document.getElementById("signalSort").value = state.sort;
     document.getElementById("signalSort").addEventListener("change",function(event) {

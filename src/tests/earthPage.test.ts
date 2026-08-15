@@ -314,6 +314,68 @@ describe("earthWatchHtml honesty of claims", () => {
     expect(html).not.toContain("scrollWheelZoom:false");
   });
 
+  it("keeps the family colour bar visible on every signal row", () => {
+    // Regression, self-inflicted in this repo's own history: the signal row is a
+    // grid whose first column is an EMPTY span coloured by hazard family. Its only
+    // height comes from the row stretching, so setting align-items:start collapsed
+    // it to nothing and silently removed the colour coding from the whole list.
+    // Nothing errored and no other test noticed.
+    expect(html).toContain("align-items:stretch");
+    expect(html).not.toContain("align-items:start");
+    expect(html).toContain(".signal-bar { border-radius:4px; background:var(--signal); }");
+  });
+
+  it("offers a hazard pill per family, plus everything", () => {
+    // The pills are built at runtime from this table, so assert the table — the
+    // rendered data-hazard attributes never appear as literals in the source.
+    for (const family of [
+      "earthquake", "weather", "volcano", "tsunami", "natural", "space_weather"
+    ]) {
+      expect(html).toContain(`key:"${family}"`);
+    }
+    expect(html).toContain('data-hazard="all"');
+    expect(html).toContain('id="hazardPills"');
+    // Every family in the table needs an icon branch, or it renders the fallback.
+    expect(html).toContain("space_weather:'<circle");
+  });
+
+  it("draws the hazard icons as stencils rather than emoji", () => {
+    // Emoji render differently on every platform and carry their own colour, which
+    // would fight the family colour these pills exist to communicate.
+    expect(html).toContain("function hazardIcon");
+    expect(html).toContain('class="hz-ico"');
+    expect(html).toContain('stroke="currentColor"');
+  });
+
+  it("lets hazard families combine instead of forcing one or all", () => {
+    // The dropdown this replaces could say "earthquakes" or "everything" and
+    // nothing in between, so "quakes and volcanoes but not the 600+ weather
+    // alerts" was unsayable.
+    expect(html).toContain("function hazardSelected");
+    expect(html).toContain("state.hazards.indexOf");
+    expect(html).not.toContain('id="hazardFilter"');
+  });
+
+  it("counts pills through the same predicate the map filters by", () => {
+    // A count computed by a second, parallel rule is a count that can disagree
+    // with what is drawn. Both go through passesWindow.
+    expect(html).toContain("function passesWindow");
+    expect(html).toContain('if (state.window === "all") return true;');
+  });
+
+  it("offers a window that shows everything, not only recent slices", () => {
+    expect(html).toContain('data-window="all"');
+  });
+
+  it("says when the signal list is truncated instead of looking complete", () => {
+    // With an Everything window the header count can read 740 while the list
+    // renders a fraction of that. A capped list that does not announce its cap
+    // reads as the whole set.
+    expect(html).toContain("Showing the top ");
+    expect(html).toContain(" signals in this view");
+    expect(html).toContain("rankedEvents.length > SIGNAL_CAP");
+  });
+
   it("keeps safeUrl refusing anything that is not https", () => {
     // If safeUrl ever stopped being the gate, the test above would still pass
     // while protecting nothing.
