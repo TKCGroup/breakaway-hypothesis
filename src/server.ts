@@ -253,11 +253,18 @@ function writeHtml(
     "content-security-policy": [
       "default-src 'self'",
       "base-uri 'self'",
-      "connect-src 'self'",
+      // earthquake.usgs.gov is the ShakeMap intensity-contour product, fetched on
+      // demand so the felt-shaking layer can show the agency's own measurement
+      // instead of falling back to a model. Without it the page still works and
+      // still says which one you are looking at — it just never gets to say
+      // "official". Exact host, no wildcard.
+      "connect-src 'self' https://earthquake.usgs.gov",
       "font-src https://fonts.gstatic.com",
       "form-action 'none'",
       "frame-ancestors 'none'",
-      "img-src 'self' data: https://unpkg.com https://*.nationalmap.gov https://*.basemaps.cartocdn.com",
+      // gibs.earthdata.nasa.gov is NASA's public-domain Blue Marble imagery for the
+      // 3D globe. Blocked, the globe renders a bare graticule.
+      "img-src 'self' data: https://unpkg.com https://*.nationalmap.gov https://*.basemaps.cartocdn.com https://gibs.earthdata.nasa.gov",
       "script-src 'self' 'unsafe-inline' https://unpkg.com",
       "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://unpkg.com"
     ].join("; "),

@@ -247,6 +247,88 @@ describe("watcher HTTP server", () => {
   });
 });
 
+describe("Earth Watch content security policy", () => {
+  /**
+   * The page and the policy live in different files, so nothing forces them to
+   * agree — and when they disagree the page still renders, still says something
+   * sensible, and quietly does less. That is exactly how this shipped once: NASA
+   * imagery and the USGS ShakeMap fetch were both blocked in production while every
+   * local check passed, because the local harness served no CSP at all.
+   *
+   * This walks the emitted page for the external hosts it actually depends on and
+   * asserts the policy permits each one, so the whole class is covered rather than
+   * the two instances that happened to break.
+   */
+  async function policy(): Promise<Record<string, string>> {
+    const { url, close } = await listen();
+    try {
+      const response = await fetch(`${url}/earth`);
+      const header = response.headers.get("content-security-policy") ?? "";
+      const directives: Record<string, string> = {};
+      for (const part of header.split(";")) {
+        const trimmed = part.trim();
+        if (!trimmed) continue;
+        const space = trimmed.indexOf(" ");
+        directives[space === -1 ? trimmed : trimmed.slice(0, space)] =
+          space === -1 ? "" : trimmed.slice(space + 1);
+      }
+      return directives;
+    } finally {
+      await close();
+    }
+  }
+
+  function permits(directive: string, host: string): boolean {
+    if (!directive) return false;
+    return directive.split(/\s+/).some((source) => {
+      if (source === host) return true;
+      if (!source.startsWith("https://*.")) return false;
+      return host.endsWith(source.replace("https://*.", "."));
+    });
+  }
+
+  it("permits every external host the page fetches data or imagery from", async () => {
+    const directives = await policy();
+    // Declared rather than scraped: these are the hosts the page is DESIGNED to
+    // reach, so a future edit that drops one from the policy fails here even if
+    // the corresponding call site was also removed by accident.
+    const required: [string, string][] = [
+      ["img-src", "https://gibs.earthdata.nasa.gov"],
+      ["connect-src", "https://earthquake.usgs.gov"],
+      ["img-src", "https://a.basemaps.cartocdn.com"],
+      ["img-src", "https://basemap.nationalmap.gov"],
+      ["script-src", "https://unpkg.com"],
+      ["style-src", "https://fonts.googleapis.com"],
+      ["font-src", "https://fonts.gstatic.com"]
+    ];
+    const denied = required.filter(([directive, host]) => !permits(directives[directive], host));
+    expect(denied).toEqual([]);
+  });
+
+  it("still refuses hosts the page has no reason to reach", async () => {
+    // A policy that permits everything would pass the test above while protecting
+    // nothing, so pin that the allowlist is still an allowlist.
+    const directives = await policy();
+    expect(permits(directives["connect-src"], "https://evil.example.com")).toBe(false);
+    expect(permits(directives["img-src"], "https://evil.example.com")).toBe(false);
+    expect(directives["default-src"]).toBe("'self'");
+    expect(directives["frame-ancestors"]).toBe("'none'");
+  });
+
+  it("keeps the three.js module served same-origin rather than from a CDN", async () => {
+    // script-src does not allow gibs or usgs, so the globe's three.js has to stay
+    // local. If someone swaps it for a CDN import the page breaks silently.
+    const { url, close } = await listen();
+    try {
+      const html = await (await fetch(`${url}/earth`)).text();
+      expect(html).toContain('import * as THREE from "/assets/three-0.180.0/three.module.js"');
+      expect(html).not.toContain("three@0.180.0/build");
+    } finally {
+      await close();
+    }
+  });
+});
+
 async function listen(server = createWatcherServer()): Promise<{ url: string; close: () => Promise<void> }> {
   await new Promise<void>((resolve) => {
     server.listen(0, "127.0.0.1", resolve);
