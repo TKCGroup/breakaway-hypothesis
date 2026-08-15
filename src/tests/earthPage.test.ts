@@ -93,7 +93,10 @@ describe("earthWatchHtml element wiring", () => {
   });
 
   it("declares the controls the new views depend on", () => {
-    for (const id of ["stage", "globe", "globeStatus", "globeClock", "dayNight", "antipodeLayer", "autoSpin"]) {
+    for (const id of [
+      "stage", "globe", "globeStatus", "globeClock", "dayNight", "antipodeLayer", "autoSpin",
+      "cycloneLayer", "cycloneParts", "cycloneStatus", "cycloneControls"
+    ]) {
       expect(declaredIds.has(id)).toBe(true);
     }
   });
@@ -185,6 +188,54 @@ describe("earthWatchHtml honesty of claims", () => {
 
     // And the local that does carry it is assigned from the sanitiser.
     expect(html).toContain("var raw = safeUrl(event.officialUrl);");
+  });
+
+  it("refuses to let the forecast cone be read as the storm's size", () => {
+    // The single most misread graphic in weather. The cone is the envelope of
+    // historical CENTRE-position error; it says nothing about how wide the storm is,
+    // and the centre leaves it about one time in three. Without this sitting in the
+    // cone's own popup, a reader outside the cone reads the map as "I am fine".
+    expect(html).toContain("The cone is not the storm.");
+    expect(html).toContain("only about two times in three");
+    expect(html).toContain("Outside the cone is not the same");
+    expect(html).toContain("says nothing about how wide the storm is");
+  });
+
+  it("says a cyclone forecast is a forecast, everywhere it draws one", () => {
+    expect(html).toContain("A forecast of the centre&rsquo;s path, not a record of it");
+    expect(html).toContain("A forecast, not an observation.");
+    // And the observed half is labelled as the opposite, so the two cannot blur.
+    expect(html).toContain("This part is observation, not forecast.");
+  });
+
+  it("names the cyclone republisher instead of implying a direct NHC feed", () => {
+    // This page's whole premise is official sources. Esri's Active Hurricanes is
+    // NHC's own advisory geometry, but it is still one hop, and NHC's own host
+    // cannot be read from a browser at all. Saying "NHC" flat would be a small lie.
+    expect(html).toContain("republished by Esri");
+    expect(html).toContain("One hop from the issuing agency, not a direct NHC feed");
+  });
+
+  it("distinguishes no active cyclones from a failed cyclone request", () => {
+    // Same shape as the sparkline rule above: an empty ocean and a dead feed render
+    // identically, and the empty one reads as reassurance.
+    expect(html).toContain("No active tropical cyclones in any NHC basin");
+    expect(html).toContain("The feed answered and it was empty");
+    expect(html).toContain("This is a failed request, not a quiet ocean");
+  });
+
+  it("treats an ArcGIS error body as a failure rather than an empty ocean", () => {
+    // The feature service answers a rejected query with HTTP 200 and an error
+    // object. A response.ok check alone would report "no storms".
+    expect(html).toContain("payload.error");
+    expect(html).toContain("feature service refused the query");
+  });
+
+  it("reports an absent cyclone wind speed as not reported rather than as calm", () => {
+    // Number(null) is 0, and 0 kt would render as a confident "tropical depression".
+    expect(html).toContain("function reportedKt");
+    expect(html).toContain('if (value == null || value === "") return null;');
+    expect(html).toContain("not reported");
   });
 
   it("keeps safeUrl refusing anything that is not https", () => {

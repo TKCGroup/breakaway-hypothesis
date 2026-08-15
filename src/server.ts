@@ -258,7 +258,15 @@ function writeHtml(
       // instead of falling back to a model. Without it the page still works and
       // still says which one you are looking at — it just never gets to say
       // "official". Exact host, no wildcard.
-      "connect-src 'self' https://earthquake.usgs.gov",
+      // services9.arcgis.com serves the Active_Hurricanes_v1 feature service: the
+      // National Hurricane Center's own advisory geometry (positions, forecast
+      // track, error cone, watches and warnings), republished by Esri with
+      // permissive CORS. NHC's own www.nhc.noaa.gov sends no
+      // access-control-allow-origin and ships shapefile/KMZ rather than GeoJSON, so
+      // a browser cannot read it directly and there is nothing to gain by listing
+      // it here. The page says out loud that this is a republisher, because one hop
+      // from the issuing agency is not the same as the issuing agency.
+      "connect-src 'self' https://earthquake.usgs.gov https://services9.arcgis.com",
       "font-src https://fonts.gstatic.com",
       "form-action 'none'",
       "frame-ancestors 'none'",

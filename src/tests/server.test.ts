@@ -295,6 +295,7 @@ describe("Earth Watch content security policy", () => {
     const required: [string, string][] = [
       ["img-src", "https://gibs.earthdata.nasa.gov"],
       ["connect-src", "https://earthquake.usgs.gov"],
+      ["connect-src", "https://services9.arcgis.com"],
       ["img-src", "https://a.basemaps.cartocdn.com"],
       ["img-src", "https://basemap.nationalmap.gov"],
       ["script-src", "https://unpkg.com"],

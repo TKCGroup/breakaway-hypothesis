@@ -1178,6 +1178,17 @@ export function earthWatchHtml(): string {
     .tgl input { margin:0; accent-color:var(--ink); }
     .tgl:has(input:checked) { color:var(--ink); border-color:var(--ink); font-weight:600; }
 
+    .cyclone-controls { margin-top:8px; align-items:center; gap:10px; }
+    .cyclone-controls[hidden] { display:none; }
+    .cyclone-status { font-size:11.5px; color:var(--muted); }
+    .cyclone-status[data-tone="empty"] { color:var(--ink); }
+    .cyclone-status[data-tone="error"] { color:#BE2618; font-weight:600; }
+    .cyclone-key { display:flex; gap:8px; flex-wrap:wrap; margin-top:7px; }
+    .cyclone-key span {
+      display:inline-flex; align-items:center; gap:4px; font-size:10.5px; color:var(--muted);
+    }
+    .cyclone-key i { width:10px; height:10px; border-radius:50%; display:inline-block; }
+
     .popup-actions { display:flex; gap:6px; flex-wrap:wrap; margin-top:9px; }
     .popup-actions button {
       font-family:inherit; font-size:11px; font-weight:650; color:var(--ink); cursor:pointer;
@@ -1374,7 +1385,27 @@ export function earthWatchHtml(): string {
       <div class="toggles">
         <label class="tgl" for="dayNight"><input type="checkbox" id="dayNight" checked> Day &amp; night</label>
         <label class="tgl" for="antipodeLayer"><input type="checkbox" id="antipodeLayer"> Antipodes</label>
+        <label class="tgl" for="cycloneLayer"><input type="checkbox" id="cycloneLayer"> Hurricane tracks</label>
         <label class="tgl" for="autoSpin"><input type="checkbox" id="autoSpin" checked> Spin globe</label>
+      </div>
+    </div>
+
+    <div class="controls cyclone-controls" id="cycloneControls" hidden>
+      <select id="cycloneParts" class="field" aria-label="Tropical cyclone layers">
+        <option value="all">Track, forecast and cone</option>
+        <option value="cone">Forecast cone and warnings only</option>
+        <option value="track">Tracks and positions only</option>
+        <option value="observed">Observed track only (no forecast)</option>
+      </select>
+      <span class="cyclone-status" id="cycloneStatus">Loading tropical cyclone advisories&hellip;</span>
+      <div class="cyclone-key">
+        <span><i style="background:#697B73"></i>Depression</span>
+        <span><i style="background:#69A88F"></i>Tropical storm</span>
+        <span><i style="background:#D3921F"></i>Cat 1</span>
+        <span><i style="background:#DE5F26"></i>Cat 2</span>
+        <span><i style="background:#BE2618"></i>Cat 3</span>
+        <span><i style="background:#8C1B12"></i>Cat 4</span>
+        <span><i style="background:#7A4D91"></i>Cat 5</span>
       </div>
     </div>
 
@@ -1495,7 +1526,9 @@ ${solarClientSource()}
       data:null, window:"now", hazard:"all", source:"all", sort:"score",
       layerById:{}, focusApplied:false, view:"map",
       dayNight:true, antipodes:false, spin:true,
-      feltEventId:null, feltSource:null, shakeMapCache:{}, sparkCache:{}
+      feltEventId:null, feltSource:null, shakeMapCache:{}, sparkCache:{},
+      cyclones:false, cycloneParts:"all", cycloneData:null,
+      cycloneFetchedAt:0, cycloneState:"idle", cycloneMissing:[]
     };
     try {
       var storedSort = localStorage.getItem("earthWatch.signalSort");
@@ -1520,11 +1553,17 @@ ${solarClientSource()}
     var terminatorLayer = L.layerGroup().addTo(map);
     var antipodeLayer = L.layerGroup().addTo(map);
     var feltRingLayer = L.layerGroup().addTo(map);
+    // The cone is a separate group from the track on purpose: it is by far the
+    // largest geometry on the map and it is the one readers most often misread, so
+    // it has to be independently switchable rather than bundled into "storms".
+    var cycloneConeLayer = L.layerGroup().addTo(map);
+    var cycloneTrackLayer = L.layerGroup().addTo(map);
     L.control.layers(
       {"Global clean map":clean, "USGS US topographic":topo},
       {
         "Aggregate signal heat":heatLayer, "Official events":eventLayer, "Target regions":regionLayer,
-        "Day and night":terminatorLayer, "Antipodes":antipodeLayer, "Felt shaking":feltRingLayer
+        "Day and night":terminatorLayer, "Antipodes":antipodeLayer, "Felt shaking":feltRingLayer,
+        "Cyclone forecast cone":cycloneConeLayer, "Cyclone track and positions":cycloneTrackLayer
       },
       {collapsed:true}
     ).addTo(map);
@@ -2352,6 +2391,351 @@ ${solarClientSource()}
     }
 
     // ---- Globe bridge --------------------------------------------------------
+    // ─────────────────────────────────────────────────────────────────────────
+    // Tropical cyclones
+    //
+    // The geometry is the National Hurricane Center's own advisory product — the
+    // same positions, forecast track, error cone and coastal warnings that go out
+    // with each advisory — republished by Esri as Active_Hurricanes_v1. NHC's own
+    // host sends no access-control-allow-origin and publishes shapefile and KMZ
+    // rather than GeoJSON, so a browser cannot read it directly. That makes this
+    // one hop from the issuing agency, and the page says so on every popup instead
+    // of implying a direct feed.
+    // ─────────────────────────────────────────────────────────────────────────
+    var CYCLONE_BASE = "https://services9.arcgis.com/RHVPKKiFTONKtxq3/arcgis/rest/services/Active_Hurricanes_v1/FeatureServer/";
+    var CYCLONE_LAYERS = [
+      {id:0, key:"forecastPoints", label:"forecast positions"},
+      {id:1, key:"observedPoints", label:"observed positions"},
+      {id:2, key:"forecastTrack",  label:"forecast track"},
+      {id:3, key:"observedTrack",  label:"observed track"},
+      {id:4, key:"cone",           label:"forecast cone"},
+      {id:5, key:"warnings",       label:"coastal watches and warnings"}
+    ];
+    var CYCLONE_REFRESH_MS = 600000;
+    var CYCLONE_PROVENANCE = "NOAA National Hurricane Center advisory product, republished by Esri. One hop from the issuing agency, not a direct NHC feed.";
+
+    // A wind speed of null, an empty string, or zero is not a measurement. The
+    // reflexive Number(x) turns every one of them into 0, which would publish a
+    // calm, confident "tropical depression" for a storm whose intensity simply was
+    // not in the record.
+    function reportedKt(value) {
+      if (value == null || value === "") return null;
+      var speed = Number(value);
+      if (!isFinite(speed) || speed <= 0) return null;
+      return speed;
+    }
+
+    function knotsText(value) {
+      var speed = reportedKt(value);
+      if (speed == null) return "not reported";
+      return Math.round(speed) + " kt (" + Math.round(speed * 1.15078) + " mph)";
+    }
+
+    // Saffir-Simpson, in knots, as NHC defines it. Below 34 kt is a depression and
+    // 34-63 kt a tropical storm: neither is a hurricane, and neither is coloured as
+    // one.
+    function cycloneCategory(windKt) {
+      var speed = reportedKt(windKt);
+      if (speed == null) return {label:"Intensity not reported", color:"#697B73"};
+      if (speed < 34) return {label:"Tropical depression", color:"#697B73"};
+      if (speed < 64) return {label:"Tropical storm", color:"#69A88F"};
+      if (speed < 83) return {label:"Category 1 hurricane", color:"#D3921F"};
+      if (speed < 96) return {label:"Category 2 hurricane", color:"#DE5F26"};
+      if (speed < 113) return {label:"Category 3 hurricane", color:"#BE2618"};
+      if (speed < 137) return {label:"Category 4 hurricane", color:"#8C1B12"};
+      return {label:"Category 5 hurricane", color:"#7A4D91"};
+    }
+
+    // The track layers carry a Saffir-Simpson number and a stage word instead of a
+    // wind speed. SS is 0 for everything below hurricane strength, so a bare
+    // Number(SS) would paint a tropical storm and a remnant low identically.
+    function cycloneStage(ssValue, typeWord) {
+      var ss = Number(ssValue);
+      if (isFinite(ss) && ss >= 1) {
+        var byCategory = {1:"#D3921F", 2:"#DE5F26", 3:"#BE2618", 4:"#8C1B12", 5:"#7A4D91"};
+        var index = Math.min(5, Math.max(1, Math.round(ss)));
+        return {color:byCategory[index], label:"Category " + index + " hurricane"};
+      }
+      var word = String(typeWord == null ? "" : typeWord).toLowerCase();
+      if (word.indexOf("hurricane") >= 0) return {color:"#BE2618", label:"Hurricane"};
+      if (word.indexOf("tropical storm") >= 0 || word === "ts") return {color:"#69A88F", label:"Tropical storm"};
+      if (word.indexOf("depression") >= 0 || word === "td") return {color:"#697B73", label:"Tropical depression"};
+      if (word.indexOf("disturbance") >= 0) return {color:"#8FA3B0", label:"Disturbance"};
+      if (word.indexOf("low") >= 0 || word.indexOf("extratropical") >= 0) return {color:"#8FA3B0", label:"Remnant or non-tropical low"};
+      if (!word) return {color:"#697B73", label:"Stage not reported"};
+      return {color:"#697B73", label:String(typeWord)};
+    }
+
+    function warningStyle(code) {
+      var key = String(code == null ? "" : code).toUpperCase();
+      if (key === "TWA") return {color:"#D3921F", label:"Tropical storm watch"};
+      if (key === "TWR") return {color:"#DE5F26", label:"Tropical storm warning"};
+      if (key === "HWA") return {color:"#BE2618", label:"Hurricane watch"};
+      if (key === "HWR") return {color:"#7A1810", label:"Hurricane warning"};
+      if (!key) return {color:"#347FAC", label:"Coastal watch or warning, type not reported"};
+      return {color:"#347FAC", label:"Coastal watch or warning (" + key + ")"};
+    }
+
+    function cycloneFeatures(key) {
+      var data = state.cycloneData;
+      if (!data) return [];
+      var value = data[key];
+      return value == null ? [] : value;
+    }
+
+    function cycloneStormNames() {
+      var seen = {};
+      var names = [];
+      ["observedPoints","forecastPoints","observedTrack","forecastTrack","cone"].forEach(function(key) {
+        cycloneFeatures(key).forEach(function(feature) {
+          var raw = feature && feature.properties && feature.properties.STORMNAME;
+          if (!raw) return;
+          var normalised = String(raw).trim().toUpperCase();
+          if (!normalised || seen[normalised]) return;
+          seen[normalised] = true;
+          names.push(String(raw).trim());
+        });
+      });
+      return names;
+    }
+
+    async function loadCyclones(force) {
+      var now = Date.now();
+      if (!force && state.cycloneData && (now - state.cycloneFetchedAt) < CYCLONE_REFRESH_MS) {
+        renderCyclones();
+        return;
+      }
+      state.cycloneState = "loading";
+      renderCycloneStatus();
+      var results = await Promise.all(CYCLONE_LAYERS.map(function(layer) {
+        return fetch(CYCLONE_BASE + layer.id + "/query?where=1%3D1&outFields=*&f=geojson")
+          .then(function(response) {
+            if (!response.ok) throw new Error("HTTP " + response.status);
+            return response.json();
+          })
+          .then(function(payload) {
+            // ArcGIS reports a rejected query as HTTP 200 with an error object in
+            // the body. Checking response.ok alone would read a refusal as an ocean
+            // with no storms in it, which is the most reassuring thing this page
+            // could possibly get wrong.
+            if (payload && payload.error) {
+              throw new Error(payload.error.message || "feature service refused the query");
+            }
+            return {key:layer.key, label:layer.label, features:(payload && payload.features) || []};
+          })
+          .catch(function(error) {
+            return {
+              key:layer.key, label:layer.label, features:null,
+              error:String((error && error.message) || error)
+            };
+          });
+      }));
+
+      var data = {};
+      var missing = [];
+      results.forEach(function(result) {
+        data[result.key] = result.features;
+        if (result.features === null) missing.push(result.label);
+      });
+      state.cycloneData = data;
+      state.cycloneMissing = missing;
+      state.cycloneFetchedAt = Date.now();
+      state.cycloneState = missing.length === CYCLONE_LAYERS.length ? "error" : "ready";
+      renderCyclones();
+    }
+
+    function renderCycloneStatus() {
+      var element = document.getElementById("cycloneStatus");
+      if (!element) return;
+      if (!state.cyclones) {
+        element.setAttribute("data-tone","normal");
+        element.textContent = "";
+        return;
+      }
+      if (state.cycloneState === "loading") {
+        element.setAttribute("data-tone","normal");
+        element.textContent = "Loading tropical cyclone advisories...";
+        return;
+      }
+      if (state.cycloneState === "error") {
+        element.setAttribute("data-tone","error");
+        element.textContent = "Tropical cyclone advisories unavailable. This is a failed request, not a quiet ocean.";
+        return;
+      }
+      if (state.cycloneState !== "ready") {
+        element.setAttribute("data-tone","normal");
+        element.textContent = "";
+        return;
+      }
+      var names = cycloneStormNames();
+      if (!names.length) {
+        // An empty map and a broken feed look identical, and the empty one reads as
+        // reassurance. Say which one this is.
+        element.setAttribute("data-tone","empty");
+        element.textContent = "No active tropical cyclones in any NHC basin. The feed answered and it was empty.";
+        return;
+      }
+      var partial = state.cycloneMissing.length
+        ? " Missing from this view: " + state.cycloneMissing.join(", ") + "."
+        : "";
+      element.setAttribute("data-tone","normal");
+      element.textContent = names.length + " active " +
+        (names.length === 1 ? "system" : "systems") + " on the flat map: " +
+        names.join(", ") + "." + partial;
+    }
+
+    function cyclonePopupHead(props, kicker) {
+      var name = (props && props.STORMNAME) || "Tropical cyclone";
+      return '<div class="popup-title">' + esc(name) + " &mdash; " + esc(kicker) + "</div>";
+    }
+
+    function renderCyclones() {
+      cycloneConeLayer.clearLayers();
+      cycloneTrackLayer.clearLayers();
+      renderCycloneStatus();
+      if (!state.cyclones || !state.cycloneData) return;
+
+      var parts = state.cycloneParts;
+      var showCone = parts === "all" || parts === "cone";
+      var showWarnings = parts === "all" || parts === "cone";
+      var showForecast = parts === "all" || parts === "track";
+      var showObserved = parts === "all" || parts === "track" || parts === "observed";
+
+      if (showCone) {
+        cycloneFeatures("cone").forEach(function(feature) {
+          var props = feature.properties || {};
+          L.geoJSON(feature, {
+            style:function() {
+              return {
+                color:"#BE2618", weight:1.5, opacity:.85, dashArray:"5 4",
+                fillColor:"#BE2618", fillOpacity:.08
+              };
+            }
+          }).bindPopup(
+            cyclonePopupHead(props, "forecast cone") +
+            (props.ADVISNUM ? '<div class="popup-row">Advisory ' + esc(props.ADVISNUM) + "</div>" : "") +
+            '<div class="popup-row">Peak forecast wind in this cone: ' + esc(knotsText(props.MAX_WIND)) + "</div>" +
+            '<div class="popup-note"><strong>The cone is not the storm.</strong> It shows where the ' +
+              "<em>centre</em> may go, drawn from the National Hurricane Center&rsquo;s own historical " +
+              "track errors. The centre stays inside it only about two times in three, and damaging " +
+              "wind, surge and rain routinely reach well beyond it. Outside the cone is not the same " +
+              "as out of danger, and the cone says nothing about how wide the storm is.</div>" +
+            '<div class="popup-note">' + esc(CYCLONE_PROVENANCE) + "</div>"
+          ).addTo(cycloneConeLayer);
+        });
+      }
+
+      if (showWarnings) {
+        cycloneFeatures("warnings").forEach(function(feature) {
+          var props = feature.properties || {};
+          var warning = warningStyle(props.TCWW);
+          L.geoJSON(feature, {
+            style:function() { return {color:warning.color, weight:5, opacity:.9}; }
+          }).bindPopup(
+            cyclonePopupHead(props, warning.label) +
+            '<div class="popup-row">Issued on this coastline by the National Hurricane Center' +
+              (props.ADVISNUM ? " with advisory " + esc(props.ADVISNUM) : "") + ".</div>" +
+            '<div class="popup-note">A <strong>warning</strong> means the conditions are expected here; ' +
+              "a <strong>watch</strong> means they are possible. Follow your local emergency management " +
+              "and the issuing agency, not this map.</div>" +
+            '<div class="popup-note">' + esc(CYCLONE_PROVENANCE) + "</div>"
+          ).addTo(cycloneConeLayer);
+        });
+      }
+
+      if (showObserved) {
+        cycloneFeatures("observedTrack").forEach(function(feature) {
+          var props = feature.properties || {};
+          var stage = cycloneStage(props.SS, props.STORMTYPE);
+          L.geoJSON(feature, {
+            style:function() { return {color:stage.color, weight:3, opacity:.9}; }
+          }).bindPopup(
+            cyclonePopupHead(props, "track already travelled") +
+            '<div class="popup-row">Stage along this segment: <strong>' + esc(stage.label) + "</strong></div>" +
+            '<div class="popup-note">Where the centre has already been, as fixed by the issuing agency. ' +
+              "This part is observation, not forecast.</div>" +
+            '<div class="popup-note">' + esc(CYCLONE_PROVENANCE) + "</div>"
+          ).addTo(cycloneTrackLayer);
+        });
+
+        cycloneFeatures("observedPoints").forEach(function(feature) {
+          var point = cyclonePoint(feature);
+          if (!point) return;
+          var props = feature.properties || {};
+          var stage = cycloneStage(props.SS, props.STORMTYPE);
+          L.circleMarker(point, {
+            radius:4, color:stage.color, weight:1.5,
+            fillColor:stage.color, fillOpacity:.85
+          }).bindPopup(
+            cyclonePopupHead(props, "observed position") +
+            '<div class="popup-row">' + esc(cycloneWhen(props.DTG)) + "</div>" +
+            '<div class="popup-row">Stage: <strong>' + esc(stage.label) + "</strong></div>" +
+            '<div class="popup-row">Maximum sustained wind: ' + esc(knotsText(props.INTENSITY)) + "</div>" +
+            '<div class="popup-row">Central pressure: ' +
+              (props.MSLP == null ? "not reported" : esc(props.MSLP) + " mb") + "</div>" +
+            '<div class="popup-note">' + esc(CYCLONE_PROVENANCE) + "</div>"
+          ).addTo(cycloneTrackLayer);
+        });
+      }
+
+      if (showForecast) {
+        cycloneFeatures("forecastTrack").forEach(function(feature) {
+          var props = feature.properties || {};
+          L.geoJSON(feature, {
+            style:function() { return {color:"#347FAC", weight:2.5, opacity:.9, dashArray:"7 5"}; }
+          }).bindPopup(
+            cyclonePopupHead(props, "forecast track") +
+            (props.FCSTPRD ? '<div class="popup-row">' + esc(props.FCSTPRD) + "-hour forecast period</div>" : "") +
+            '<div class="popup-note">A forecast of the centre&rsquo;s path, not a record of it. Read it ' +
+              "together with the cone, which is the part that carries the uncertainty.</div>" +
+            '<div class="popup-note">' + esc(CYCLONE_PROVENANCE) + "</div>"
+          ).addTo(cycloneTrackLayer);
+        });
+
+        cycloneFeatures("forecastPoints").forEach(function(feature) {
+          var point = cyclonePoint(feature);
+          if (!point) return;
+          var props = feature.properties || {};
+          var category = cycloneCategory(props.MAXWIND);
+          L.circleMarker(point, {
+            radius:6, color:category.color, weight:2,
+            fillColor:category.color, fillOpacity:.35
+          }).bindPopup(
+            cyclonePopupHead(props, "forecast position") +
+            '<div class="popup-row">' +
+              (props.FLDATELBL ? esc(props.FLDATELBL) : (props.DATELBL ? esc(props.DATELBL) : "Valid time not reported")) +
+              (props.TAU == null ? "" : " (" + esc(props.TAU) + " h out)") + "</div>" +
+            '<div class="popup-row">Forecast intensity: <strong>' + esc(category.label) + "</strong></div>" +
+            '<div class="popup-row">Maximum sustained wind: ' + esc(knotsText(props.MAXWIND)) +
+              ", gusting " + esc(knotsText(props.GUST)) + "</div>" +
+            '<div class="popup-note">A forecast, not an observation. Intensity forecasts carry ' +
+              "real error, and a category shown here is the agency&rsquo;s expectation rather than a " +
+              "measurement.</div>" +
+            '<div class="popup-note">' + esc(CYCLONE_PROVENANCE) + "</div>"
+          ).addTo(cycloneTrackLayer);
+        });
+      }
+    }
+
+    function cyclonePoint(feature) {
+      var geometry = feature && feature.geometry;
+      if (!geometry || geometry.type !== "Point") return null;
+      var coordinates = geometry.coordinates;
+      if (!coordinates || coordinates.length < 2) return null;
+      var lon = Number(coordinates[0]);
+      var lat = Number(coordinates[1]);
+      if (!isFinite(lat) || !isFinite(lon)) return null;
+      if (lat < -90 || lat > 90 || lon < -180 || lon > 180) return null;
+      return [lat, lon];
+    }
+
+    function cycloneWhen(value) {
+      if (value == null || value === "") return "Time not reported";
+      var when = new Date(Number(value));
+      if (isNaN(when.getTime())) return "Time not reported";
+      return when.toISOString().replace("T"," ").slice(0,16) + " UTC";
+    }
+
     // The globe lives in a module script (it imports three.js) and publishes itself
     // on window.EarthGlobe when ready. Every call here is guarded: if WebGL is
     // unavailable or three.js fails to load, the flat map keeps working untouched.
@@ -2445,6 +2829,16 @@ ${solarClientSource()}
       state.antipodes = event.target.checked;
       renderAntipodes();
       pushGlobe();
+    });
+    document.getElementById("cycloneLayer").addEventListener("change",function(event) {
+      state.cyclones = event.target.checked;
+      document.getElementById("cycloneControls").hidden = !state.cyclones;
+      if (state.cyclones) loadCyclones(false);
+      else renderCyclones();
+    });
+    document.getElementById("cycloneParts").addEventListener("change",function(event) {
+      state.cycloneParts = event.target.value;
+      renderCyclones();
     });
     document.getElementById("autoSpin").addEventListener("change",function(event) {
       state.spin = event.target.checked;
