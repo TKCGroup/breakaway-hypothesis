@@ -1317,14 +1317,16 @@ export function earthWatchHtml(): string {
     /* Hazard pills. Same visual family as the .score chips on the notable card,
        but these are controls: they toggle, they carry a live count, and they show
        the family colour they filter to. */
-    .hazard-pills { display:flex; gap:6px; flex-wrap:wrap; margin:9px 0 2px; }
+    /* Sized for the signal column, which is narrow, so these wrap onto two or
+       three rows rather than forcing a horizontal scroll. */
+    .hazard-pills { display:flex; gap:5px; flex-wrap:wrap; margin:9px 0 10px; }
     .hz {
-      display:inline-flex; align-items:center; gap:5px;
-      border:1px solid var(--hair); border-radius:3px; padding:4px 8px;
-      font-family:"IBM Plex Mono",monospace; font-size:11px;
-      background:var(--panel); color:var(--muted); cursor:pointer; line-height:1.2;
+      display:inline-flex; align-items:center; gap:4px;
+      border:1px solid var(--hair); border-radius:3px; padding:3px 7px;
+      font-family:"IBM Plex Mono",monospace; font-size:10.5px;
+      background:var(--panel); color:var(--muted); cursor:pointer; line-height:1.25;
     }
-    .hz svg { width:12px; height:12px; display:block; flex:0 0 auto; }
+    .hz svg { width:11px; height:11px; display:block; flex:0 0 auto; }
     .hz .hz-ico { color:var(--hz,#697B73); }
     .hz .hz-n { font-variant-numeric:tabular-nums; opacity:.7; }
     .hz:hover { border-color:var(--hz,var(--ink)); color:var(--ink); }
@@ -1493,7 +1495,6 @@ export function earthWatchHtml(): string {
       </div>
     </div>
 
-    <div class="hazard-pills" id="hazardPills" role="group" aria-label="Hazard families"></div>
 
     <div class="controls" style="margin-top:10px">
       <div class="segmented" aria-label="Map projection">
@@ -1566,7 +1567,10 @@ export function earthWatchHtml(): string {
           <div class="globe-wrap">
             <canvas id="globe" role="img" aria-label="Rotatable globe showing official geohazard events and the current solar day and night terminator"></canvas>
             <div class="globe-tools">
+              <button type="button" id="globeZoomIn" aria-label="Zoom in">+</button>
+              <button type="button" id="globeZoomOut" aria-label="Zoom out">&minus;</button>
               <button type="button" id="globeReset">Recentre</button>
+              <button type="button" id="globePillars" aria-pressed="true">Pillars</button>
               <button type="button" id="globeFollow" aria-pressed="false">Follow top signal</button>
             </div>
             <div class="globe-clock" id="globeClock"></div>
@@ -1608,6 +1612,9 @@ export function earthWatchHtml(): string {
               <span class="mono" id="signalCount">0</span>
             </span>
           </div>
+          <!-- The pills live with the feed they filter. They were up in the map
+               controls, which is off-screen once you have scrolled to the list. -->
+          <div class="hazard-pills" id="hazardPills" role="group" aria-label="Filter the feed by hazard family"></div>
           <div class="signals" id="signals"><div class="empty">Loading...</div></div>
         </section>
         <section class="sec">
@@ -3478,6 +3485,17 @@ ${solarClientSource()}
     document.getElementById("globeReset").addEventListener("click",function() {
       if (window.EarthGlobe) window.EarthGlobe.recentre();
     });
+    document.getElementById("globeZoomIn").addEventListener("click",function() {
+      if (window.EarthGlobe) window.EarthGlobe.zoomBy(0.8);
+    });
+    document.getElementById("globeZoomOut").addEventListener("click",function() {
+      if (window.EarthGlobe) window.EarthGlobe.zoomBy(1.25);
+    });
+    document.getElementById("globePillars").addEventListener("click",function() {
+      var pressed = this.getAttribute("aria-pressed") === "true";
+      this.setAttribute("aria-pressed", pressed ? "false" : "true");
+      if (window.EarthGlobe) window.EarthGlobe.setPillars(!pressed);
+    });
     document.getElementById("globeFollow").addEventListener("click",function() {
       if (!window.EarthGlobe || !state.data) return;
       var focus = state.data.map.focus;
@@ -3569,7 +3587,7 @@ ${solarClientSource()}
   const GLOBE_RADIUS = 1;
   const state = {
     active:false, dayNight:true, spin:true,
-    distance:3.35, yaw:0, pitch:0, dragging:false, lastPointer:null,
+    distance:3.35, yaw:0, pitch:0, dragging:false, lastPointer:null, pillars:true,
     events:[], colors:{}, showAntipodes:false, hovered:null
   };
 
@@ -3751,6 +3769,17 @@ ${solarClientSource()}
   }));
   scene.add(markers);
 
+  // Pillars. Two vertices per event — one on the surface, one directly above it
+  // along the same radius — so the shaft reads as rising straight out of the
+  // planet. Height carries the score, which is what a reader is scanning for:
+  // on a sphere a flat dot near the limb is nearly invisible, but a pillar at
+  // the limb is a silhouette and reads from any angle.
+  const pillarGeometry = new THREE.BufferGeometry();
+  const pillars = new THREE.LineSegments(pillarGeometry, new THREE.LineBasicMaterial({
+    vertexColors:true, transparent:true, opacity:.85, depthWrite:false
+  }));
+  scene.add(pillars);
+
   const antipodeGeometry = new THREE.BufferGeometry();
   const antipodeMarkers = new THREE.Points(antipodeGeometry, new THREE.PointsMaterial({
     size:0.024, map:discTexture(), color:0x9FB2C4, transparent:true, opacity:.75,
@@ -3767,7 +3796,10 @@ ${solarClientSource()}
   // ---- Interaction ---------------------------------------------------------
   function applyCamera() {
     state.pitch = Math.max(-1.35, Math.min(1.35, state.pitch));
-    state.distance = Math.max(1.35, Math.min(7, state.distance));
+    // Floor was 1.35, which on a unit sphere is barely closer than the default
+    // 3.35 and made the globe feel like it would not zoom at all. 1.12 gets the
+    // camera close enough to read a single region.
+    state.distance = Math.max(1.12, Math.min(7, state.distance));
     const cosPitch = Math.cos(state.pitch);
     camera.position.set(
       state.distance * cosPitch * Math.sin(state.yaw),
@@ -3838,7 +3870,7 @@ ${solarClientSource()}
       return;
     }
     setStatus(
-      state.events.length + " official signals plotted  ·  drag to turn, scroll to zoom, hover a point to identify it" +
+      state.events.length + " official signals plotted  ·  drag to turn, scroll or use +/- to zoom, hover a point to identify it" +
       (state.showAntipodes ? "  ·  grey points are earthquake antipodes" : "")
     );
   }
@@ -3900,6 +3932,17 @@ ${solarClientSource()}
       globeUniforms.dayNightMix.value = on ? 1 : 0;
     },
     setSpin(on) { state.spin = on; },
+    setPillars(on) {
+      state.pillars = on;
+      // Re-run setEvents so the heights and the marker tips are recomputed from
+      // the same source, rather than toggling visibility and leaving the markers
+      // floating where the pillar tips used to be.
+      window.EarthGlobe.setEvents(state.events, { antipodes:state.showAntipodes, colors:state.colors });
+    },
+    zoomBy(factor) {
+      state.distance *= factor;
+      applyCamera();
+    },
     recentre() {
       state.yaw = 0; state.pitch = 0; state.distance = 3.35;
       applyCamera();
@@ -3927,25 +3970,53 @@ ${solarClientSource()}
 
       const positions = new Float32Array(points.length * 3);
       const colors = new Float32Array(points.length * 3);
+      // Two vertices per pillar: base on the surface, tip where the marker sits.
+      const pillarPositions = new Float32Array(points.length * 6);
+      const pillarColors = new Float32Array(points.length * 6);
       const tint = new THREE.Color();
       points.forEach((event, index) => {
         const lon = Number(event.geometry.coordinates[0]);
         const lat = Number(event.geometry.coordinates[1]);
-        // Lift the marker off the surface so it is not z-fought by the sphere, and
-        // lift it further with score so the strongest signals read first.
-        const lift = 1.008 + Math.min(0.05, (event.score || 0) / 1600);
-        const vector = solar.geoToVector(lat, lon, lift);
+        // Pillar height carries the score. Earthquakes take magnitude instead,
+        // because a reader comparing quakes is comparing magnitudes and a scored
+        // rank would flatten an M7.7 and an M5.2 that happen to rank alike.
+        const magnitude = Number(event.magnitude);
+        const strength = event.family === "earthquake" && Number.isFinite(magnitude)
+          ? Math.max(0, Math.min(1, (magnitude - 2.5) / 6))
+          : Math.max(0, Math.min(1, (event.score || 0) / 100));
+        // A visible minimum, so a low-scoring event is still a mark and not a
+        // dot that has silently vanished into the surface.
+        const height = state.pillars ? 0.035 + strength * 0.34 : 0.012;
+        const base = solar.geoToVector(lat, lon, 1.001);
+        const vector = solar.geoToVector(lat, lon, 1.001 + height);
         positions[index*3] = vector.x;
         positions[index*3+1] = vector.y;
         positions[index*3+2] = vector.z;
+        pillarPositions[index*6] = base.x;
+        pillarPositions[index*6+1] = base.y;
+        pillarPositions[index*6+2] = base.z;
+        pillarPositions[index*6+3] = vector.x;
+        pillarPositions[index*6+4] = vector.y;
+        pillarPositions[index*6+5] = vector.z;
         tint.set(state.colors[event.family] || "#697B73");
         colors[index*3] = tint.r;
         colors[index*3+1] = tint.g;
         colors[index*3+2] = tint.b;
+        // Fade the shaft toward its base so the tip is the thing that reads.
+        pillarColors[index*6] = tint.r * 0.35;
+        pillarColors[index*6+1] = tint.g * 0.35;
+        pillarColors[index*6+2] = tint.b * 0.35;
+        pillarColors[index*6+3] = tint.r;
+        pillarColors[index*6+4] = tint.g;
+        pillarColors[index*6+5] = tint.b;
       });
       markerGeometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
       markerGeometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
       markerGeometry.computeBoundingSphere();
+      pillarGeometry.setAttribute("position", new THREE.BufferAttribute(pillarPositions, 3));
+      pillarGeometry.setAttribute("color", new THREE.BufferAttribute(pillarColors, 3));
+      pillarGeometry.computeBoundingSphere();
+      pillars.visible = state.pillars && points.length > 0;
 
       const anti = state.showAntipodes
         ? points.filter((event) => event.family === "earthquake" && event.antipode)

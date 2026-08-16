@@ -95,10 +95,44 @@ describe("earthWatchHtml element wiring", () => {
   it("declares the controls the new views depend on", () => {
     for (const id of [
       "stage", "globe", "globeStatus", "globeClock", "dayNight", "antipodeLayer", "autoSpin",
-      "cycloneLayer", "cycloneParts", "cycloneStatus", "cycloneControls"
+      "cycloneLayer", "cycloneParts", "cycloneStatus", "cycloneControls",
+      "tsunamiLayer", "tsunamiParts", "tsunamiStatus", "hazardPills",
+      "globeZoomIn", "globeZoomOut", "globePillars"
     ]) {
       expect(declaredIds.has(id)).toBe(true);
     }
+  });
+
+  it("gives the globe a visible zoom control, not only the wheel", () => {
+    // "How do I zoom in" was the actual question. The wheel worked; nothing said
+    // so and there was no button.
+    expect(html).toContain('id="globeZoomIn"');
+    expect(html).toContain('id="globeZoomOut"');
+    expect(html).toContain("zoomBy(");
+    expect(html).toContain("scroll or use +/- to zoom");
+  });
+
+  it("lets the globe zoom close enough to read one region", () => {
+    // The floor was 1.35 on a unit sphere against a 3.35 default, so the globe
+    // barely moved and read as though zoom were broken.
+    expect(html).toContain("Math.max(1.12, Math.min(7, state.distance))");
+  });
+
+  it("raises event pillars out of the sphere rather than flat dots", () => {
+    // A flat dot near the limb of a sphere is nearly invisible; a pillar there is
+    // a silhouette and reads from any angle.
+    expect(html).toContain("const pillarGeometry");
+    expect(html).toContain("THREE.LineSegments");
+    expect(html).toContain("state.pillars");
+    expect(html).toContain("setPillars(on)");
+  });
+
+  it("scales an earthquake pillar by magnitude, not by rank", () => {
+    // Score is a rank across mixed hazard families. Two quakes can rank alike and
+    // differ by orders of magnitude in energy, so a scored pillar would flatten
+    // exactly the comparison a reader is making.
+    expect(html).toContain('event.family === "earthquake" && Number.isFinite(magnitude)');
+    expect(html).toContain("(magnitude - 2.5) / 6");
   });
 
   it("offers both projections and defaults to the flat map", () => {
