@@ -154,7 +154,15 @@ export interface EarthShakingReport {
 }
 
 export interface EarthMapFocus {
-  mode: "signal_cluster" | "us_fallback";
+  /**
+   * `lead_signal` — the viewport opened on the single most significant eligible event.
+   * `us_fallback` — nothing qualified, so the map shows the United States.
+   *
+   * Was `signal_cluster` until the default became a single-event pick; the name is part
+   * of the published payload's description of *how* the viewport was chosen, so it
+   * changed with the method rather than outliving it.
+   */
+  mode: "lead_signal" | "us_fallback";
   center: [number, number];
   zoom: number;
   score: number;
@@ -268,7 +276,7 @@ export function buildEarthWatchData(
     sources: dashboard.sources,
     map: {
       coverage:
-        "The initial viewport follows the strongest eligible global official-signal cluster, with a United States fallback when no active signal qualifies.",
+        "The initial viewport opens on the single most significant eligible official signal — highest severity first, most recent to break a tie — zoomed to include nearby activity, with a United States fallback when no active signal qualifies.",
       method:
         "Heat indicates eligible official signal load, not disaster probability. Earthquake map context persists by magnitude (under M4: 2h; M4-M5: 24h; M6: 72h; M7+: 7d) without changing the hard notification stale gate. " +
         "Distance-to-population is computed from " + CITY_ATTRIBUTION + "; the seismic run-up chart queries the USGS catalogue directly and is not drawn from this map's own selection.",
@@ -979,36 +987,48 @@ function earthMapFocus(events: EarthMapEvent[]): EarthMapFocus {
     };
   }
 
-  const ranked = candidates
-    .map((anchor) => {
-      const members = candidates
-        .filter(
-          (candidate) =>
-            (candidate.event.id === anchor.event.id ||
-              candidate.event.score >= 35) &&
-            distanceKm(anchor.point, candidate.point) <= 650
-        )
-        .sort(
-          (a, b) =>
-            b.event.score - a.event.score ||
-            Date.parse(b.event.eventTime) - Date.parse(a.event.eventTime)
-        );
-      const clusterScore =
-        anchor.event.score + Math.min(7, Math.max(0, members.length - 1) * 1.5);
-      return { anchor, members, clusterScore };
-    })
+  // The lead signal is the single most significant eligible event, full stop. Recency
+  // only breaks a tie between equals.
+  //
+  // This deliberately replaced an aggregate "cluster score" (anchor score plus up to +7
+  // for neighbours within 650km), which could hand the opening viewport to a smaller
+  // event that merely had company: +7 is less than one magnitude step above M6, so an
+  // M6.0 with five neighbours outranked a lone M6.5. A reader opening the page is asking
+  // "what is the biggest thing happening right now?", and the honest answer to that is
+  // never "a quieter place where more is going on".
+  //
+  // Recency needs no explicit decay here because eligibility already encodes it:
+  // `isActiveMapEvent` gates on the magnitude-tiered map-context window (sub-M4 lapses
+  // after 2h, M7+ persists 7 days), so anything still in `candidates` is current *for its
+  // own size*. Ranking those survivors by score is what makes "latest major" mean the
+  // major one that is still happening, rather than the newest blip on the wire.
+  const ranked = [...candidates].sort(
+    (a, b) =>
+      b.event.score - a.event.score ||
+      Date.parse(b.event.eventTime) - Date.parse(a.event.eventTime) ||
+      a.event.id.localeCompare(b.event.id)
+  );
+  const lead = ranked[0]!;
+
+  // Neighbours are context for the lead, not competitors with it: they set how far to
+  // zoom out so the surrounding activity is visible, and they are named in the label.
+  // They no longer influence which event was chosen.
+  const neighbours = candidates
+    .filter(
+      (candidate) =>
+        candidate.event.id !== lead.event.id &&
+        candidate.event.score >= 35 &&
+        distanceKm(lead.point, candidate.point) <= 650
+    )
     .sort(
       (a, b) =>
-        b.clusterScore - a.clusterScore ||
-        b.anchor.event.score - a.anchor.event.score ||
-        b.members.length - a.members.length ||
-        Date.parse(b.anchor.event.eventTime) -
-          Date.parse(a.anchor.event.eventTime)
+        b.event.score - a.event.score ||
+        Date.parse(b.event.eventTime) - Date.parse(a.event.eventTime)
     );
-  const selected = ranked[0]!;
-  const maxDistanceKm = selected.members.reduce(
-    (largest, member) =>
-      Math.max(largest, distanceKm(selected.anchor.point, member.point)),
+
+  const maxDistanceKm = neighbours.reduce(
+    (largest, neighbour) =>
+      Math.max(largest, distanceKm(lead.point, neighbour.point)),
     0
   );
   const zoom =
@@ -1021,15 +1041,17 @@ function earthMapFocus(events: EarthMapEvent[]): EarthMapFocus {
           : 3;
 
   return {
-    mode: "signal_cluster",
-    center: selected.anchor.point,
+    mode: "lead_signal",
+    center: lead.point,
     zoom,
-    score: Math.min(100, Math.round(selected.clusterScore)),
+    // The lead event's own score, not an aggregate. A number on screen next to one
+    // event's name has to be that event's number.
+    score: Math.min(100, Math.round(lead.event.score)),
     label:
-      selected.members.length > 1
-        ? `${shortFocusTitle(selected.anchor.event.title)} and ${selected.members.length - 1} nearby official signals`
-        : shortFocusTitle(selected.anchor.event.title),
-    eventIds: selected.members.slice(0, 24).map((member) => member.event.id)
+      neighbours.length > 0
+        ? `${shortFocusTitle(lead.event.title)} and ${neighbours.length} nearby official signals`
+        : shortFocusTitle(lead.event.title),
+    eventIds: [lead, ...neighbours].slice(0, 24).map((member) => member.event.id)
   };
 }
 
@@ -2774,7 +2796,12 @@ ${solarClientSource()}
       document.getElementById("liveDot").classList.toggle("stale",data.posture.sourceHealth !== "healthy");
       document.getElementById("currentCount").textContent = String(data.summary.activeMapSignals);
       document.getElementById("regionCount").textContent = String(data.map.regions.filter(function(region){ return Number(region.effectiveStage.slice(1)) >= 2; }).length);
-      document.getElementById("mapFocus").textContent = data.map.focus.mode === "signal_cluster" ? "Top activity: " + data.map.focus.label + "." : "No eligible global signal; showing the United States fallback.";
+      // Keyed on the fallback, not on the signal mode. The inverse ("=== signal mode")
+      // silently reported "no eligible global signal" for every mode name it had not
+      // been taught — so a rename on the server side would have published a false
+      // all-quiet while the map sat on a live M7. Only the one genuine no-signal mode
+      // may produce the no-signal sentence.
+      document.getElementById("mapFocus").textContent = data.map.focus.mode === "us_fallback" ? "No eligible global signal; showing the United States fallback." : "Leading signal: " + data.map.focus.label + ".";
       document.getElementById("method").textContent = data.map.method + " " + data.map.coverage;
       renderNotable(); renderSources(); renderRegions(); renderTerminator(); renderMap(); renderContext();
       renderHazardPills();

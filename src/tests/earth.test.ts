@@ -132,7 +132,7 @@ describe("Earth Watch data", () => {
       staleGatePassed: true
     });
     expect(data.map.focus).toMatchObject({
-      mode: "signal_cluster",
+      mode: "lead_signal",
       center: [35.15, -97.1]
     });
     expect(data.map.events.find((event) => event.id === "eonet")).toMatchObject({
@@ -277,10 +277,120 @@ describe("Earth Watch data", () => {
     expect(data.summary.currentFreshSignals).toBe(1);
     expect(data.summary.activeMapSignals).toBe(2);
     expect(data.map.focus).toMatchObject({
-      mode: "signal_cluster",
+      mode: "lead_signal",
       center: [38.1, 142.4],
       eventIds: ["japan-major"]
     });
+  });
+
+  /**
+   * The default view answers "what is the biggest thing happening right now?", so the
+   * single most significant eligible event must win it outright. The previous selector
+   * ranked by an aggregate cluster score — anchor score plus up to +7 for neighbours
+   * within 650km — which meant a genuinely larger lone event could lose the viewport to
+   * a smaller one that merely had company. The gap it takes to flip is small (+7 is
+   * under one magnitude step above M6), so this was not a theoretical ordering quirk.
+   */
+  it("opens on the single most significant event, not on the busiest neighbourhood", () => {
+    const snapshot = emptySnapshot();
+    const neighbours = [0, 1, 2, 3, 4].map((index) =>
+      eventFixture({
+        id: `chile-neighbour-${index}`,
+        externalId: `chile-neighbour-${index}`,
+        title: `M 2.4 - near Valparaiso ${index}`,
+        region: undefined,
+        lat: -33.0 + index * 0.05,
+        lon: -71.6,
+        magnitude: 2.4
+      })
+    );
+    snapshot.events = [
+      // Alone in the Indian Ocean: nothing is within 650km to lend it a cluster bonus.
+      eventFixture({
+        id: "lone-major",
+        externalId: "lone-major",
+        title: "M 6.5 - Southwest Indian Ridge",
+        region: undefined,
+        lat: -33.0,
+        lon: 57.0,
+        magnitude: 6.5
+      }),
+      // Smaller, but surrounded — this is what used to take the viewport.
+      eventFixture({
+        id: "clustered-anchor",
+        externalId: "clustered-anchor",
+        title: "M 6.0 - offshore Valparaiso, Chile",
+        region: undefined,
+        lat: -33.0,
+        lon: -71.6,
+        magnitude: 6.0
+      }),
+      ...neighbours
+    ];
+
+    const data = buildEarthWatchData(snapshot, DEFAULT_CONFIG, NOW);
+    const lone = data.map.events.find((event) => event.id === "lone-major");
+    const clustered = data.map.events.find(
+      (event) => event.id === "clustered-anchor"
+    );
+
+    // Guard the premise: the lone event really is the more significant of the two, and
+    // the margin really is inside the +7 the old cluster bonus could hand out. If either
+    // stops holding, this test would pass for the wrong reason.
+    expect(lone!.score).toBeGreaterThan(clustered!.score);
+    expect(lone!.score - clustered!.score).toBeLessThan(7);
+
+    expect(data.map.focus).toMatchObject({
+      mode: "lead_signal",
+      center: [-33.0, 57.0],
+      score: lone!.score
+    });
+    expect(data.map.focus.eventIds[0]).toBe("lone-major");
+  });
+
+  /**
+   * Recency is the tiebreak, not the ranking. Two events of identical significance are
+   * separated by which one is newer — but a fresher small event never displaces a larger
+   * one, because the magnitude-tiered map-context window (M7+ stays eligible 7 days,
+   * sub-M4 only 2h) already does the "is this still current?" work upstream.
+   */
+  it("breaks a tie on significance by preferring the more recent event", () => {
+    const snapshot = emptySnapshot();
+    snapshot.events = [
+      eventFixture({
+        id: "older-equal",
+        externalId: "older-equal",
+        title: "M 6.2 - older of two equals",
+        region: undefined,
+        lat: 10.0,
+        lon: 120.0,
+        magnitude: 6.2,
+        // Both events must still be inside the stale gate, or the older one drops to
+        // status "recent" and silently loses the +3 "current" bump — which would make
+        // this a significance test wearing a recency test's clothes.
+        eventTime: new Date("2026-07-08T11:00:00.000Z"),
+        sourceUpdatedAt: new Date("2026-07-08T11:10:00.000Z")
+      }),
+      eventFixture({
+        id: "newer-equal",
+        externalId: "newer-equal",
+        title: "M 6.2 - newer of two equals",
+        region: undefined,
+        lat: -20.0,
+        lon: -40.0,
+        magnitude: 6.2,
+        eventTime: new Date("2026-07-08T11:30:00.000Z"),
+        sourceUpdatedAt: new Date("2026-07-08T11:40:00.000Z")
+      })
+    ];
+
+    const data = buildEarthWatchData(snapshot, DEFAULT_CONFIG, NOW);
+    const older = data.map.events.find((event) => event.id === "older-equal");
+    const newer = data.map.events.find((event) => event.id === "newer-equal");
+
+    expect(newer!.score).toBe(older!.score);
+    expect(data.map.focus.eventIds[0]).toBe("newer-equal");
+    expect(data.map.focus.center).toEqual([-20.0, -40.0]);
   });
 
   it("applies the disclosed magnitude windows at their boundaries", () => {
