@@ -20,6 +20,7 @@ import {
   type NearestPopulation
 } from "./logic/nearestCity.js";
 import { solarClientSource } from "./logic/solar.js";
+import { ambientClientSource } from "./logic/ambient.js";
 import { evaluateStaleGate } from "./logic/staleGate.js";
 import type {
   CascadeStage,
@@ -1473,9 +1474,75 @@ export function earthWatchHtml(): string {
       .dot { animation:pulse 2.4s ease-in-out infinite; }
     }
     @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
+
+    /* ── Ambient glow ────────────────────────────────────────────────────────
+       A colour-coded edge wash readable from across a dark room with no text.
+       Colour = hazard family of the most significant current event (the same
+       palette the map legend already teaches). Reach + alpha = how recent and
+       how serious. JS only ever sets these three variables.
+
+       Night watch exists because this page is light-only: a near-white page is
+       itself a lamp in a dark bedroom, and a subtle glow on white is invisible.
+       After a period of no interaction the page dims to near-black so the glow
+       becomes the whole signal; any input restores it instantly.
+       ──────────────────────────────────────────────────────────────────────── */
+    :root {
+      --ambient-color:#2F7D57;
+      --ambient-alpha:0.08;
+      --ambient-reach:4vmin;
+    }
+    #ambientGlow {
+      position:fixed; inset:0; z-index:9998;
+      pointer-events:none;
+      box-shadow: inset 0 0 var(--ambient-reach) calc(var(--ambient-reach) / 2.5) var(--ambient-color);
+      opacity:var(--ambient-alpha);
+      transition:opacity 1.6s ease, box-shadow 1.6s ease;
+    }
+    #ambientScrim {
+      position:fixed; inset:0; z-index:9997;
+      background:#05070A; opacity:0; pointer-events:none;
+      transition:opacity 1.8s ease;
+    }
+    #ambientReadout {
+      position:fixed; left:0; right:0; bottom:9vh; z-index:9999;
+      text-align:center; pointer-events:none; opacity:0;
+      transition:opacity 1.8s ease;
+      font-family:"IBM Plex Mono",ui-monospace,monospace;
+      font-size:clamp(11px,1.5vw,15px);
+      letter-spacing:.22em; text-transform:uppercase;
+      color:var(--ambient-color);
+    }
+    #ambientToggle {
+      position:fixed; right:14px; bottom:14px; z-index:10000;
+      background:var(--panel); color:var(--muted);
+      border:1px solid var(--hair); border-radius:3px;
+      font-family:"IBM Plex Mono",ui-monospace,monospace;
+      font-size:10px; letter-spacing:.14em; text-transform:uppercase;
+      padding:5px 9px; cursor:pointer; opacity:.55;
+      transition:opacity .3s ease, color .3s ease;
+    }
+    #ambientToggle:hover { opacity:1; color:var(--ink); }
+    #ambientToggle[aria-pressed="true"] { color:var(--clear); border-color:var(--clear); }
+    html[data-ambient="on"] #ambientScrim { opacity:.955; pointer-events:auto; }
+    html[data-ambient="on"] #ambientReadout { opacity:.52; }
+    html[data-ambient="on"] #ambientToggle { opacity:.12; }
+    @media (prefers-reduced-motion:no-preference) {
+      #ambientGlow.ambient-pulse { animation:ambient-breathe 7s ease-in-out infinite; }
+    }
+    @keyframes ambient-breathe {
+      0%,100% { opacity:var(--ambient-alpha); }
+      50%     { opacity:calc(var(--ambient-alpha) * 0.42); }
+    }
   </style>
 </head>
 <body>
+  <!-- Ambient overlay. Decoration only: aria-hidden, pointer-events:none on the
+       glow. The signal feed below carries every fact this conveys. -->
+  <div id="ambientScrim" aria-hidden="true"></div>
+  <div id="ambientGlow" aria-hidden="true"></div>
+  <div id="ambientReadout" aria-hidden="true"></div>
+  <button id="ambientToggle" type="button" aria-pressed="false"
+          title="Night watch: dim the page after 3 minutes idle so the edge glow reads in a dark room">night watch</button>
   <div class="wrap">
     <header class="mast">
       <div>
@@ -3580,6 +3647,112 @@ ${solarClientSource()}
       }
     });
     window.addEventListener("resize",function(){ setTimeout(function(){ map.invalidateSize(); },50); });
+    // ── Ambient glow + night watch ───────────────────────────────────────
+    // The severity maths is NOT written here — it is the unit-tested source from
+    // src/logic/ambient.ts, interpolated verbatim (same pattern as the solar
+    // block) so there is one definition rather than a TS copy and a client copy
+    // that drift. Tests: src/tests/ambient.test.ts + earthAmbientPage.test.ts
+${ambientClientSource()}
+
+    var AMBIENT_IDLE_MS = 3 * 60 * 1000;
+    var ambientIdleTimer = null;
+    var ambientEnabled = true;
+    try {
+      ambientEnabled = window.localStorage.getItem("earthNightWatch") !== "off";
+    } catch (e) { /* private mode — default on, never throw */ }
+
+    function ambientFamilyLabel(family) {
+      if (!family) return "all quiet";
+      for (var i = 0; i < HAZARD_FAMILIES.length; i++) {
+        if (HAZARD_FAMILIES[i].key === family) return HAZARD_FAMILIES[i].label;
+      }
+      return family.replace(/_/g, " ");
+    }
+
+    function ambientAgo(hours) {
+      if (!isFinite(hours) || hours < 0) return "";
+      if (hours < 1) return Math.max(1, Math.round(hours * 60)) + "m ago";
+      if (hours < 48) return Math.round(hours) + "h ago";
+      return Math.round(hours / 24) + "d ago";
+    }
+
+    // Every visible signal the map is currently showing, spatial and not.
+    function ambientEvents() {
+      if (!state.data || !state.data.map) return [];
+      var m = state.data.map;
+      var spatial = Array.isArray(m.events) ? m.events : [];
+      var flat = Array.isArray(m.nonSpatialSignals) ? m.nonSpatialSignals : [];
+      return spatial.concat(flat);
+    }
+
+    // The server's own lead-signal pick. Strictly better than re-ranking client
+    // side: 457 live weather alerts tie at score 100 (oldest 26 days back) while
+    // the real lead was an M7.7 at 98, so raw score alone chose a month-old alert.
+    function ambientLeadId() {
+      if (!state.data || !state.data.map || !state.data.map.focus) return null;
+      var ids = state.data.map.focus.eventIds;
+      return Array.isArray(ids) && ids.length ? ids[0] : null;
+    }
+
+    function applyAmbient() {
+      var glow = ambientGlow(ambientEvents(), new Date(), ambientLeadId());
+      var root = document.documentElement;
+      root.style.setProperty("--ambient-color", glow.color);
+      root.style.setProperty("--ambient-alpha", String(glow.alpha));
+      root.style.setProperty("--ambient-reach", (4 + 18 * glow.intensity).toFixed(2) + "vmin");
+
+      var el = document.getElementById("ambientGlow");
+      if (el) {
+        if (glow.pulse) el.classList.add("ambient-pulse");
+        else el.classList.remove("ambient-pulse");
+      }
+
+      var out = document.getElementById("ambientReadout");
+      if (out) {
+        var parts = [ambientFamilyLabel(glow.family)];
+        var ago = ambientAgo(glow.ageHours);
+        if (glow.family && ago) parts.push(ago);
+        out.textContent = parts.join("  ·  ");
+      }
+    }
+
+    function ambientExit() {
+      document.documentElement.removeAttribute("data-ambient");
+    }
+
+    function ambientArm() {
+      if (ambientIdleTimer) clearTimeout(ambientIdleTimer);
+      ambientExit();
+      if (!ambientEnabled) return;
+      ambientIdleTimer = setTimeout(function () {
+        document.documentElement.setAttribute("data-ambient", "on");
+        applyAmbient();
+      }, AMBIENT_IDLE_MS);
+    }
+
+    ["pointerdown", "pointermove", "keydown", "wheel", "touchstart", "scroll"].forEach(function (evt) {
+      window.addEventListener(evt, ambientArm, { passive: true });
+    });
+
+    var ambientBtn = document.getElementById("ambientToggle");
+    if (ambientBtn) {
+      ambientBtn.setAttribute("aria-pressed", ambientEnabled ? "true" : "false");
+      ambientBtn.addEventListener("click", function (e) {
+        e.stopPropagation();
+        ambientEnabled = !ambientEnabled;
+        try { window.localStorage.setItem("earthNightWatch", ambientEnabled ? "on" : "off"); } catch (err) {}
+        ambientBtn.setAttribute("aria-pressed", ambientEnabled ? "true" : "false");
+        ambientArm();
+      });
+    }
+
+    // Its own cadence, deliberately not hooked into render(): the glow must keep
+    // decaying with the lead event's age between the 5-minute data polls, and
+    // wrapping someone else's render path is a good way to break it.
+    applyAmbient();
+    setInterval(applyAmbient, 20 * 1000);
+    ambientArm();
+
     load();
     setInterval(load,5*60*1000);
   })();

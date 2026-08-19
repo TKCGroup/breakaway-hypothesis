@@ -1,0 +1,59 @@
+{
+  "note": "TRIMMED FROM LIVE /api/earth on 2026-08-19. NOT hand-written. A hand-written fixture encodes your assumption of the payload; this slice refuted mine - 457 weather events tie at score 100, the oldest 26 days back, while the map's actual lead is an M7.7 earthquake at score 98. Ranking by raw score picked a month-old weather alert and would have glowed red all night instead of earthquake blue.",
+  "focus": {
+    "eventIds": [
+      "86369490f6a9133b6699aee1"
+    ],
+    "label": "M 7.7 - 68 km NNW of Ende, Indonesia and 10 nearby official signals"
+  },
+  "events": [
+    {
+      "id": "86369490f6a9133b6699aee1",
+      "family": "earthquake",
+      "score": 98,
+      "magnitude": 7.7,
+      "eventTime": "2026-08-14T21:58:21.564Z",
+      "status": "recent"
+    },
+    {
+      "id": "2311ba4cbb26854850f47ba8",
+      "family": "weather",
+      "score": 100,
+      "magnitude": null,
+      "eventTime": "2026-07-24T01:41:00.000Z",
+      "status": "recent"
+    },
+    {
+      "id": "96452bfcd69dbf4619047e0d",
+      "family": "weather",
+      "score": 100,
+      "magnitude": null,
+      "eventTime": "2026-07-24T21:32:00.000Z",
+      "status": "recent"
+    },
+    {
+      "id": "0e64db5387e69fd22af8c6ee",
+      "family": "weather",
+      "score": 100,
+      "magnitude": null,
+      "eventTime": "2026-07-24T21:46:00.000Z",
+      "status": "recent"
+    },
+    {
+      "id": "b94a911e1d224c28c27a300f",
+      "family": "weather",
+      "score": 100,
+      "magnitude": null,
+      "eventTime": "2026-08-18T23:51:00.000Z",
+      "status": "recent"
+    },
+    {
+      "id": "336bd20f7f0304ccec638518",
+      "family": "weather",
+      "score": 100,
+      "magnitude": null,
+      "eventTime": "2026-08-18T23:53:00.000Z",
+      "status": "recent"
+    }
+  ]
+}
