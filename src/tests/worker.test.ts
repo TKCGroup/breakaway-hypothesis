@@ -73,6 +73,9 @@ describe("worker", () => {
           ]
         });
       }
+      if (url.includes("nhc.noaa.gov/CurrentStorms.json")) {
+        return jsonResponse({ activeStorms: [] });
+      }
       if (url.includes("services.swpc.noaa.gov")) {
         return jsonResponse([["time_tag", "Kp"]]);
       }
@@ -115,7 +118,7 @@ describe("worker", () => {
       ).toBe(true);
       expect(await repo.listNotifications()).not.toHaveLength(0);
       const contextEventIds = (await repo.listEvents())
-        .filter((event) => event.eventType === "natural_event" || event.eventType === "weather_alert")
+        .filter((event) => event.eventType === "natural_event" || event.eventType === "weather_alert" || event.eventType === "tropical_cyclone")
         .map((event) => event.id);
       expect(contextEventIds).toHaveLength(2);
       expect(states.every((state) => !contextEventIds.includes(state.latestEventId))).toBe(true);

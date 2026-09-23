@@ -836,6 +836,29 @@ function earthSignalScore(
         : /watch/i.test(event.severity ?? "")
           ? 72
           : 35;
+  } else if (event.eventType === "tropical_cyclone") {
+    const classification = (event.severity ?? "").split("/")[0]?.toUpperCase() ?? "";
+    const knots = event.magnitude ?? 0;
+    if (classification === "HU" || knots >= 64) {
+      score =
+        knots >= 137
+          ? 100
+          : knots >= 113
+            ? 96
+            : knots >= 96
+              ? 92
+              : knots >= 83
+                ? 88
+                : 84;
+    } else if (classification === "TS" || classification === "STS" || classification === "SS" || knots >= 34) {
+      score = 78;
+    } else if (classification === "TD" || classification === "SD") {
+      score = 64;
+    } else if (classification === "PTC") {
+      score = 58;
+    } else {
+      score = 48;
+    }
   } else if (event.eventType === "natural_event") {
     const category = event.severity?.toLowerCase() ?? "";
     score = category.includes("severe storm")
@@ -860,7 +883,7 @@ function earthSignalScore(
 
 function hazardFamily(event: NormalizedEvent): HazardFamily {
   if (event.eventType === "earthquake") return "earthquake";
-  if (event.eventType === "weather_alert") return "weather";
+  if (event.eventType === "weather_alert" || event.eventType === "tropical_cyclone") return "weather";
   if (event.eventType === "volcano_notice") return "volcano";
   if (event.eventType === "tsunami") return "tsunami";
   if (event.eventType === "space_weather") return "space_weather";
@@ -907,6 +930,7 @@ function sourceLabel(source: string): string {
     nasa_donki: "NASA DONKI",
     nasa_eonet: "NASA EONET",
     nws_alerts: "NOAA/NWS alerts",
+    nhc_current_storms: "NOAA/NHC tropical cyclones",
     tsunami_ntwc: "NOAA NTWC tsunami",
     tsunami_ptwc: "NOAA PTWC tsunami"
   };
@@ -1971,7 +1995,7 @@ ${solarClientSource()}
     }
     function sourceGroup(source) {
       if (source.indexOf("usgs_") === 0) return "usgs";
-      if (source === "nws_alerts") return "nws";
+      if (source === "nws_alerts" || source === "nhc_current_storms") return "nws";
       if (source.indexOf("swpc_") === 0) return "swpc";
       if (source.indexOf("nasa_") === 0) return "nasa";
       if (source.indexOf("tsunami_") === 0) return "tsunami";

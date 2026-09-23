@@ -173,3 +173,12 @@
 - [x] Add compact earthquake magnitude/depth details and absolute event/update timestamps on hover.
 - [x] Preserve row-to-map focus, notification stale-gate isolation, and official-source-only behavior.
 - [x] Pass typecheck, 81 tests, build, diff, inline-script syntax, live-snapshot simulation, and responsive browser verification before requesting Altbot deployment.
+
+
+## NHC Active Storms Patch — 2026-09-22 (draft branch)
+
+- Branch: `feat/nhc-current-storms-epac-cpac`
+- Adds official `https://www.nhc.noaa.gov/CurrentStorms.json` ingest as `nhc_current_storms`.
+- Context-only for cascade/Slack (same posture as NWS alerts / EONET): persists + Earth Watch `/api/earth` map points for Atlantic/EPAC/CPAC centers (Polo/Odalys measured live at patch time; Nolo not active in NHC feed).
+- Does **not** change DRY_RUN, secrets, DNS, or CF Worker. Esri cyclone track layer remains client-side republisher for forecast cones.
+- Fridge deploy request: draft for Alt Bridge; Breakaway (not Nok) should drop `from/sender: breakaway` into `fridge/altbot/`.

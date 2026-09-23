@@ -61,6 +61,7 @@ export const OFFICIAL_SOURCES = new Set<OfficialSource>([
   "nasa_donki",
   "nasa_eonet",
   "nws_alerts",
+  "nhc_current_storms",
   "tsunami_ntwc",
   "tsunami_ptwc"
 ]);
@@ -82,6 +83,7 @@ export const DEFAULT_CONFIG: WatcherConfig = {
       nasa_donki: 12,
       nasa_eonet: 6,
       nws_alerts: 1,
+      nhc_current_storms: 6,
       tsunami_ntwc: 2,
       tsunami_ptwc: 2
     }

@@ -55,7 +55,7 @@ Deployment scaffolding lives in `deploy/` and targets the Altbot GCP project `al
 2. USGS HANS volcano API.
 3. NOAA/SWPC, NASA DONKI, and NOAA tsunami feeds.
 
-NASA EONET natural events and severe/extreme NOAA/NWS CAP alerts provide broader dashboard context. They are persisted as official-source records but intentionally excluded from cascade scoring and Slack notification output.
+NASA EONET natural events, severe/extreme NOAA/NWS CAP alerts, and NOAA/NHC `CurrentStorms.json` active tropical cyclones (Atlantic/EPAC/CPAC) provide broader dashboard and Earth Watch context. They are persisted as official-source records but intentionally excluded from cascade scoring and Slack notification output.
 
 The Earth Watch heat layer visualizes the relative load of current official
 signals. It is not a disaster-probability model, earthquake prediction, or an

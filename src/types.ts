@@ -9,6 +9,7 @@ export type OfficialSource =
   | "nasa_donki"
   | "nasa_eonet"
   | "nws_alerts"
+  | "nhc_current_storms"
   | "tsunami_ntwc"
   | "tsunami_ptwc";
 
@@ -19,6 +20,7 @@ export type EventType =
   | "tsunami"
   | "natural_event"
   | "weather_alert"
+  | "tropical_cyclone"
   | "source_context";
 
 export type CascadeStage = "S0" | "S1" | "S2" | "S3" | "S4" | "S5";

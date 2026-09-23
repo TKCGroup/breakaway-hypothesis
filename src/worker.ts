@@ -8,6 +8,7 @@ import { WatcherScheduler } from "./scheduler.js";
 import { fetchDonkiEvents } from "./sources/donki.js";
 import { fetchEonetEvents } from "./sources/eonet.js";
 import { fetchNwsAlerts } from "./sources/nwsAlerts.js";
+import { fetchNhcCurrentStorms } from "./sources/nhcCurrentStorms.js";
 import { fetchSwpcKp } from "./sources/swpc.js";
 import { fetchTsunamiFeed } from "./sources/tsunami.js";
 import { fetchUsgsEarthquakeFeed } from "./sources/usgsEarthquake.js";
@@ -32,6 +33,7 @@ export async function runOnce(now = new Date(), repo: WatcherRepository = new In
     { source: "nasa_donki", run: () => fetchDonkiEvents(config.nasaApiKey, now) },
     { source: "nasa_eonet", run: () => fetchEonetEvents(now) },
     { source: "nws_alerts", run: () => fetchNwsAlerts(now) },
+    { source: "nhc_current_storms", run: () => fetchNhcCurrentStorms(now) },
     { source: "tsunami_ntwc", run: () => fetchTsunamiFeed("ntwc", now) },
     { source: "tsunami_ptwc", run: () => fetchTsunamiFeed("ptwc", now) }
   ];
@@ -127,7 +129,11 @@ export async function runOnce(now = new Date(), repo: WatcherRepository = new In
 }
 
 function isDashboardContextOnly(event: NormalizedEvent): boolean {
-  return event.eventType === "natural_event" || event.eventType === "weather_alert";
+  return (
+    event.eventType === "natural_event" ||
+    event.eventType === "weather_alert" ||
+    event.eventType === "tropical_cyclone"
+  );
 }
 
 async function activeWatchWindows(
