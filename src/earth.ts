@@ -1593,7 +1593,7 @@ export function earthWatchHtml(): string {
       <div class="toggles">
         <label class="tgl" for="dayNight"><input type="checkbox" id="dayNight" checked> Day &amp; night</label>
         <label class="tgl" for="antipodeLayer"><input type="checkbox" id="antipodeLayer"> Antipodes</label>
-        <label class="tgl" for="cycloneLayer"><input type="checkbox" id="cycloneLayer"> Hurricane tracks</label>
+        <label class="tgl" for="cycloneLayer"><input type="checkbox" id="cycloneLayer" checked> Hurricane tracks</label>
         <label class="tgl" for="tsunamiLayer"><input type="checkbox" id="tsunamiLayer"> Tsunami</label>
         <label class="tgl" for="autoSpin"><input type="checkbox" id="autoSpin" checked> Spin globe</label>
       </div>
@@ -1752,7 +1752,7 @@ ${solarClientSource()}
       layerById:{}, focusApplied:false, view:"map",
       dayNight:true, antipodes:false, spin:true,
       feltEventId:null, feltSource:null, shakeMapCache:{}, sparkCache:{},
-      cyclones:false, cycloneParts:"all", cycloneData:null,
+      cyclones:true, cycloneParts:"all", cycloneData:null,
       cycloneFetchedAt:0, cycloneState:"idle", cycloneMissing:[],
       tsunami:false, tsunamiParts:"all", tsunamiData:null,
       tsunamiFetchedAt:0, tsunamiState:"idle",
@@ -3554,6 +3554,11 @@ ${solarClientSource()}
       if (state.cyclones) loadCyclones(false);
       else renderCyclones();
     });
+    // Boot with tracks on so EPAC/CPAC storms (Polo, Odalys, Hawaii invest) show
+    // without a manual toggle. Layer used to fetch only on change.
+    document.getElementById("cycloneControls").hidden = !state.cyclones;
+    if (state.cyclones) loadCyclones(false);
+
     document.getElementById("cycloneParts").addEventListener("change",function(event) {
       state.cycloneParts = event.target.value;
       renderCyclones();
