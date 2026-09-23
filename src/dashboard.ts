@@ -18,6 +18,7 @@ const SCHEDULED_SOURCES = [
   "nasa_donki",
   "nasa_eonet",
   "nws_alerts",
+  "nhc_current_storms",
   "tsunami_ntwc",
   "tsunami_ptwc"
 ] as const;
@@ -2353,6 +2354,7 @@ function sourceLabel(source: string): string {
     nasa_donki: "NASA DONKI",
     nasa_eonet: "NASA EONET",
     nws_alerts: "NOAA/NWS alerts",
+    nhc_current_storms: "NOAA/NHC tropical cyclones",
     tsunami_ntwc: "NOAA NTWC tsunami",
     tsunami_ptwc: "NOAA PTWC tsunami"
   };
