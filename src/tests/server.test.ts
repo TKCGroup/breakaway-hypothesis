@@ -82,11 +82,11 @@ describe("watcher HTTP server", () => {
     }
   });
 
-  it("serves the public Earth Watch shell", async () => {
+  it("keeps the retired flat-map Earth Watch page reachable at ?view=classic", async () => {
     const { url, close } = await listen();
 
     try {
-      const response = await fetch(`${url}/earth`);
+      const response = await fetch(`${url}/earth?view=classic`);
       expect(response.status).toBe(200);
       expect(response.headers.get("content-type")).toContain("text/html");
       expect(response.headers.get("cache-control")).toContain("s-maxage=300");
@@ -247,7 +247,7 @@ describe("watcher HTTP server", () => {
   });
 });
 
-describe("Earth Watch content security policy", () => {
+describe("Earth Watch content security policy (classic page)", () => {
   /**
    * The page and the policy live in different files, so nothing forces them to
    * agree — and when they disagree the page still renders, still says something
@@ -262,7 +262,7 @@ describe("Earth Watch content security policy", () => {
   async function policy(): Promise<Record<string, string>> {
     const { url, close } = await listen();
     try {
-      const response = await fetch(`${url}/earth`);
+      const response = await fetch(`${url}/earth?view=classic`);
       const header = response.headers.get("content-security-policy") ?? "";
       const directives: Record<string, string> = {};
       for (const part of header.split(";")) {
@@ -324,7 +324,7 @@ describe("Earth Watch content security policy", () => {
     // local. If someone swaps it for a CDN import the page breaks silently.
     const { url, close } = await listen();
     try {
-      const html = await (await fetch(`${url}/earth`)).text();
+      const html = await (await fetch(`${url}/earth?view=classic`)).text();
       expect(html).toContain('import * as THREE from "/assets/three-0.180.0/three.module.js"');
       expect(html).not.toContain("three@0.180.0/build");
     } finally {

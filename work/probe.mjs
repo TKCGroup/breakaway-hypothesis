@@ -1,0 +1,14 @@
+import puppeteer from "/Users/tyler/Developer/gods-eye-view/node_modules/puppeteer/lib/puppeteer/puppeteer.js";
+const which = process.argv.slice(2);
+const browser = await puppeteer.launch({ headless: "new", executablePath: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", args: ["--use-angle=metal", "--enable-gpu", "--no-sandbox"], defaultViewport: { width: 1440, height: 900 } });
+const page = await browser.newPage();
+const bad = [];
+page.on("response", (r) => { if (r.status() >= 400) bad.push(r.status() + " " + r.url().slice(0, 130)); });
+await page.goto("http://localhost:8788/earth", { waitUntil: "domcontentloaded" });
+await page.waitForFunction(() => document.documentElement.getAttribute("data-globe") === "ready", { timeout: 60000 });
+await new Promise((r) => setTimeout(r, 2500));
+for (const id of which) await page.evaluate((i) => document.getElementById(i).click(), id);
+await new Promise((r) => setTimeout(r, 7000));
+await page.screenshot({ path: "work/probe-" + (which.join("-") || "none") + ".png", clip: { x: 150, y: 120, width: 800, height: 600 } });
+console.log(which, bad.slice(0, 6));
+await browser.close();

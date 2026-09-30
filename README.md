@@ -36,7 +36,7 @@ The production entrypoint is `src/server.ts`:
 - `GET /healthz` returns basic service status.
 - `GET /dashboard` serves the live operator and engine view.
 - `GET /api/dashboard` returns its official-source JSON snapshot.
-- `GET /earth` serves the public, mobile-first Earth Watch map.
+- `GET /earth` serves the public, mobile-first Earth Watch globe (MapLibre GL JS, loaded lazily; the signal list is server-rendered). `GET /earth?view=classic` serves the retired Leaflet page until the globe is accepted. See `DEPLOY-NOTES.md`.
 - `GET /visualizations` serves the interactive visualization gallery.
 - `GET /earth/visualizations` is the origin-safe visualization alias.
 - `GET /assets/three-0.180.0/*` serves the pinned local Three.js browser runtime.

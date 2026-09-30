@@ -9,7 +9,8 @@ import {
   dashboardHtml,
   loadDashboardSnapshot
 } from "./dashboard.js";
-import { buildEarthWatchData, earthWatchHtml } from "./earth.js";
+import { buildEarthWatchData, earthWatchHtml, type EarthWatchData } from "./earth.js";
+import { earthGlobeContentSecurityPolicy, earthGlobeHtml } from "./earthGlobe.js";
 import { barkleyVisualizationHtml } from "./visualizations.js";
 import { runOnce } from "./worker.js";
 
@@ -139,6 +140,31 @@ export function createWatcherServer(options: WatcherServerOptions = {}) {
   });
 }
 
+/**
+ * The snapshot behind the no-JavaScript list. It is a progressive enhancement: any
+ * failure, or a slow database, yields no list and the page still works by script.
+ */
+async function loadGlobeListData(context: ServerContext): Promise<EarthWatchData | null> {
+  let handle: RepositoryHandle | undefined;
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    handle = context.createRepositoryHandle();
+    const repo = handle.repo;
+    const work = loadDashboardSnapshot(repo).then((snapshot) =>
+      buildEarthWatchData(snapshot, context.config)
+    );
+    const timeout = new Promise<null>((resolve) => {
+      timer = setTimeout(() => resolve(null), 4000);
+    });
+    return await Promise.race([work, timeout]);
+  } catch {
+    return null;
+  } finally {
+    if (timer) clearTimeout(timer);
+    await handle?.close().catch(() => undefined);
+  }
+}
+
 async function route(req: IncomingMessage, res: ServerResponse, context: ServerContext): Promise<void> {
   const pathname = new URL(req.url ?? "/", "http://localhost").pathname.replace(/\/+$/, "") || "/";
 
@@ -166,11 +192,19 @@ async function route(req: IncomingMessage, res: ServerResponse, context: ServerC
       writeJson(res, 405, { ok: false, error: "method_not_allowed" });
       return;
     }
+    const cache = "public, max-age=0, s-maxage=300, stale-while-revalidate=60";
+    // The Leaflet page stays reachable while Altbot verifies the globe; delete this
+    // branch (and earthWatchHtml) once the globe is accepted.
+    if (new URL(req.url ?? "/", "http://localhost").searchParams.get("view") === "classic") {
+      writeHtml(res, 200, earthWatchHtml(), cache);
+      return;
+    }
     writeHtml(
       res,
       200,
-      earthWatchHtml(),
-      "public, max-age=0, s-maxage=300, stale-while-revalidate=60"
+      earthGlobeHtml({ data: await loadGlobeListData(context) }),
+      cache,
+      earthGlobeContentSecurityPolicy()
     );
     return;
   }
@@ -245,12 +279,13 @@ function writeHtml(
   res: ServerResponse,
   statusCode: number,
   body: string,
-  cacheControl = "no-store"
+  cacheControl = "no-store",
+  contentSecurityPolicy?: string
 ): void {
   res.writeHead(statusCode, {
     "content-type": "text/html; charset=utf-8",
     "cache-control": cacheControl,
-    "content-security-policy": [
+    "content-security-policy": contentSecurityPolicy ?? [
       "default-src 'self'",
       "base-uri 'self'",
       // earthquake.usgs.gov is the ShakeMap intensity-contour product, fetched on

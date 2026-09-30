@@ -1,4 +1,5 @@
 {
   "extends": "./tsconfig.json",
+  "compilerOptions": { "removeComments": true },
   "exclude": ["src/tests/**/*.ts", "vitest.config.ts"]
 }
