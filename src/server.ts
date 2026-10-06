@@ -3,11 +3,13 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { fileURLToPath } from "node:url";
 import { loadConfig, type WatcherConfig } from "./config.js";
 import { createRepository, type RepositoryHandle } from "./db/createRepository.js";
+import type { PostgresRepositoryOptions } from "./db/postgresRepository.js";
 import { runMigrations } from "./db/migrations.js";
 import {
   buildDashboardData,
   dashboardHtml,
-  loadDashboardSnapshot
+  loadDashboardSnapshot,
+  type DashboardSnapshot
 } from "./dashboard.js";
 import { buildEarthWatchData, earthWatchHtml, type EarthWatchData } from "./earth.js";
 import { earthGlobeContentSecurityPolicy, earthGlobeHtml } from "./earthGlobe.js";
@@ -35,12 +37,27 @@ let running = false;
 
 interface ServerContext {
   config: WatcherConfig;
-  createRepositoryHandle: () => RepositoryHandle;
+  createRepositoryHandle: (options?: PostgresRepositoryOptions) => RepositoryHandle;
+  globeList: GlobeListLimits;
 }
+
+/** Bounds on the server-rendered `/earth` list. Defaults are production; tests shrink them. */
+export interface GlobeListLimits {
+  /** The HTML never waits longer than this for the list; Postgres cancels the read at the same bound. */
+  timeoutMs: number;
+  /** Ceiling on event rows read for the list window. Hitting it renders no list rather than a partial one. */
+  maxEventRows: number;
+}
+
+export const DEFAULT_GLOBE_LIST_LIMITS: GlobeListLimits = { timeoutMs: 4000, maxEventRows: 20_000 };
+
+/** Matches the ±30-day window `buildEarthWatchData` filters the map and list to. */
+const GLOBE_EVENT_WINDOW_MS = 30 * 86_400_000;
 
 export interface WatcherServerOptions {
   config?: WatcherConfig;
-  createRepositoryHandle?: () => RepositoryHandle;
+  createRepositoryHandle?: (options?: PostgresRepositoryOptions) => RepositoryHandle;
+  globeList?: Partial<GlobeListLimits>;
 }
 
 async function handleRun(req: IncomingMessage, res: ServerResponse, context: ServerContext): Promise<void> {
@@ -132,7 +149,10 @@ async function handleEarthApi(req: IncomingMessage, res: ServerResponse, context
 export function createWatcherServer(options: WatcherServerOptions = {}) {
   const context: ServerContext = {
     config: options.config ?? config,
-    createRepositoryHandle: options.createRepositoryHandle ?? createRepository
+    createRepositoryHandle:
+      options.createRepositoryHandle ??
+      ((repositoryOptions) => createRepository(process.env.DATABASE_URL, repositoryOptions)),
+    globeList: { ...DEFAULT_GLOBE_LIST_LIMITS, ...options.globeList }
   };
 
   return createServer((req, res) => {
@@ -143,26 +163,61 @@ export function createWatcherServer(options: WatcherServerOptions = {}) {
 /**
  * The snapshot behind the no-JavaScript list. It is a progressive enhancement: any
  * failure, or a slow database, yields no list and the page still works by script.
+ *
+ * Bounded three ways (tkc-codex 5d3cb2f6): events are read only for the ±30-day window
+ * the list can show, capped at `maxEventRows`; Postgres cancels any statement at
+ * `timeoutMs`; and the handle is closed WITHOUT awaiting it, because `pool.end()` waits
+ * for active clients and would otherwise hold the HTML past the timeout.
  */
 async function loadGlobeListData(context: ServerContext): Promise<EarthWatchData | null> {
+  const { timeoutMs, maxEventRows } = context.globeList;
   let handle: RepositoryHandle | undefined;
   let timer: NodeJS.Timeout | undefined;
   try {
-    handle = context.createRepositoryHandle();
+    handle = context.createRepositoryHandle({ statementTimeoutMs: timeoutMs });
     const repo = handle.repo;
-    const work = loadDashboardSnapshot(repo).then((snapshot) =>
-      buildEarthWatchData(snapshot, context.config)
+    const now = new Date();
+    const work = loadGlobeListSnapshot(repo, now, maxEventRows).then((snapshot) =>
+      snapshot ? buildEarthWatchData(snapshot, context.config, now) : null
     );
+    work.catch(() => undefined); // a read that loses the race may still reject later
     const timeout = new Promise<null>((resolve) => {
-      timer = setTimeout(() => resolve(null), 4000);
+      timer = setTimeout(() => resolve(null), timeoutMs);
     });
     return await Promise.race([work, timeout]);
   } catch {
     return null;
   } finally {
     if (timer) clearTimeout(timer);
-    await handle?.close().catch(() => undefined);
+    void handle?.close().catch(() => undefined);
   }
+}
+
+/**
+ * The dashboard snapshot with events narrowed to the list window. Returns null when the
+ * window holds `maxEventRows` or more: the ranking would then be computed over a partial
+ * set, and an honest "loading" fallback beats a confidently wrong list.
+ */
+async function loadGlobeListSnapshot(
+  repo: RepositoryHandle["repo"],
+  now: Date,
+  maxEventRows: number
+): Promise<DashboardSnapshot | null> {
+  const from = new Date(now.getTime() - GLOBE_EVENT_WINDOW_MS);
+  const to = new Date(now.getTime() + GLOBE_EVENT_WINDOW_MS);
+  const [events, rest] = await Promise.all([
+    repo.listEventsBetween(from, to, maxEventRows),
+    Promise.all([
+      repo.listSourceRuns(),
+      repo.listCascadeStates(),
+      repo.listNotifications(),
+      repo.listWatchWindows(),
+      repo.listRegionBaselines()
+    ])
+  ]);
+  if (events.length >= maxEventRows) return null;
+  const [sourceRuns, cascadeStates, notifications, windows, baselines] = rest;
+  return { events, sourceRuns, cascadeStates, notifications, windows, baselines };
 }
 
 async function route(req: IncomingMessage, res: ServerResponse, context: ServerContext): Promise<void> {

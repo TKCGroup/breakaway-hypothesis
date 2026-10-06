@@ -86,11 +86,30 @@ interface SourceRunRow {
   error: string | null;
 }
 
+export interface PostgresRepositoryOptions {
+  /**
+   * Server-side cap on every statement this pool runs. Postgres cancels the query
+   * itself, so `pool.end()` cannot be held open by a read that outlived its caller.
+   */
+  statementTimeoutMs?: number;
+}
+
+export function postgresPoolConfig(databaseUrl: string, options: PostgresRepositoryOptions = {}) {
+  return {
+    connectionString: databaseUrl,
+    max: 5,
+    ...(options.statementTimeoutMs ? { statement_timeout: options.statementTimeoutMs } : {})
+  };
+}
+
 export class PostgresWatcherRepository implements WatcherRepository {
   constructor(private readonly pool: Pool) {}
 
-  static fromConnectionString(databaseUrl: string): PostgresWatcherRepository {
-    return new PostgresWatcherRepository(new Pool({ connectionString: databaseUrl, max: 5 }));
+  static fromConnectionString(
+    databaseUrl: string,
+    options: PostgresRepositoryOptions = {}
+  ): PostgresWatcherRepository {
+    return new PostgresWatcherRepository(new Pool(postgresPoolConfig(databaseUrl, options)));
   }
 
   async close(): Promise<void> {
@@ -189,6 +208,15 @@ export class PostgresWatcherRepository implements WatcherRepository {
 
   async listEvents(): Promise<NormalizedEvent[]> {
     return rows(await this.pool.query<EventRow>(`SELECT * FROM events ORDER BY event_time DESC`)).map(eventFromRow);
+  }
+
+  async listEventsBetween(from: Date, to: Date, limit: number): Promise<NormalizedEvent[]> {
+    return rows(
+      await this.pool.query<EventRow>(
+        `SELECT * FROM events WHERE event_time >= $1 AND event_time <= $2 ORDER BY event_time DESC LIMIT $3`,
+        [from, to, limit]
+      )
+    ).map(eventFromRow);
   }
 
   async saveWatchWindow(window: WatchWindow): Promise<void> {

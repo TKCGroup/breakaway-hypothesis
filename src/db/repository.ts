@@ -12,6 +12,8 @@ export interface WatcherRepository {
   listSourceRuns(): Promise<SourceRun[]>;
   upsertEvent(event: NormalizedEvent): Promise<EventUpsertResult>;
   listEvents(): Promise<NormalizedEvent[]>;
+  /** Events with `from <= event_time <= to`, newest first, at most `limit` rows. */
+  listEventsBetween(from: Date, to: Date, limit: number): Promise<NormalizedEvent[]>;
   saveWatchWindow(window: WatchWindow): Promise<void>;
   listWatchWindows(): Promise<WatchWindow[]>;
   saveCascadeState(state: CascadeState): Promise<void>;
@@ -80,6 +82,13 @@ export class InMemoryWatcherRepository implements WatcherRepository {
 
   async listEvents(): Promise<NormalizedEvent[]> {
     return [...this.eventsBySourceExternalId.values()];
+  }
+
+  async listEventsBetween(from: Date, to: Date, limit: number): Promise<NormalizedEvent[]> {
+    return [...this.eventsBySourceExternalId.values()]
+      .filter((event) => event.eventTime >= from && event.eventTime <= to)
+      .sort((a, b) => b.eventTime.getTime() - a.eventTime.getTime())
+      .slice(0, limit);
   }
 
   async saveWatchWindow(window: WatchWindow): Promise<void> {
