@@ -1618,7 +1618,7 @@ export function earthWatchHtml(): string {
         <label class="tgl" for="dayNight"><input type="checkbox" id="dayNight" checked> Day &amp; night</label>
         <label class="tgl" for="antipodeLayer"><input type="checkbox" id="antipodeLayer"> Antipodes</label>
         <label class="tgl" for="cycloneLayer"><input type="checkbox" id="cycloneLayer" checked> Hurricane tracks</label>
-        <label class="tgl" for="tsunamiLayer"><input type="checkbox" id="tsunamiLayer"> Tsunami</label>
+        <label class="tgl" for="tsunamiLayer"><input type="checkbox" id="tsunamiLayer"> Tsunami alerts</label>
         <label class="tgl" for="autoSpin"><input type="checkbox" id="autoSpin" checked> Spin globe</label>
       </div>
     </div>
@@ -1644,9 +1644,8 @@ export function earthWatchHtml(): string {
 
     <div class="controls cyclone-controls" id="tsunamiControls" hidden>
       <select id="tsunamiParts" class="field" aria-label="Tsunami layers">
-        <option value="all">Active warnings and recorded history</option>
-        <option value="live">Active warnings only</option>
-        <option value="history">Recorded history only</option>
+        <option value="live">Current tsunami alerts only</option>
+        <option value="history">Historical archive — not active alerts</option>
       </select>
       <span class="cyclone-status" id="tsunamiStatus">Loading tsunami data&hellip;</span>
     </div>
@@ -1778,7 +1777,8 @@ ${solarClientSource()}
       feltEventId:null, feltSource:null, shakeMapCache:{}, sparkCache:{},
       cyclones:true, cycloneParts:"all", cycloneData:null,
       cycloneFetchedAt:0, cycloneState:"idle", cycloneMissing:[],
-      tsunami:false, tsunamiParts:"all", tsunamiData:null,
+      tsunami:false, tsunamiParts:"live", tsunamiData:null,
+      tsunamiLiveFetchedAt:0, tsunamiHistoryFetchedAt:0, tsunamiLiveState:"idle", tsunamiHistoryState:"idle",
       tsunamiFetchedAt:0, tsunamiState:"idle",
       userMovedMap:false, suppressMoveFlag:false
     };
@@ -1826,7 +1826,7 @@ ${solarClientSource()}
         "Day and night":terminatorLayer, "Antipodes":antipodeLayer, "Felt shaking":feltRingLayer,
         "Cyclone forecast cone":cycloneConeLayer, "Cyclone track and positions":cycloneTrackLayer,
         "Alert area":alertZoneLayer,
-        "Tsunami warnings (active)":tsunamiLiveLayer, "Tsunami history":tsunamiHistoryLayer
+        "Tsunami warnings (active)":tsunamiLiveLayer, "Historical tsunami sources (archive)":tsunamiHistoryLayer
       },
       {collapsed:true}
     ).addTo(map);
@@ -3281,76 +3281,65 @@ ${solarClientSource()}
     }
 
     async function loadTsunami(force) {
+      // Independent caches: switching to current alerts must never reuse a history-only read.
+      var historyMode = state.tsunamiParts === "history";
+      var cacheKey = historyMode ? "tsunamiHistoryFetchedAt" : "tsunamiLiveFetchedAt";
+      var stateKey = historyMode ? "tsunamiHistoryState" : "tsunamiLiveState";
       var now = Date.now();
-      if (!force && state.tsunamiData && (now - state.tsunamiFetchedAt) < TSUNAMI_REFRESH_MS) {
+      if (state[stateKey] === "loading" || (!force && state[cacheKey] && (now - state[cacheKey]) < TSUNAMI_REFRESH_MS)) {
         renderTsunami();
         return;
       }
-      state.tsunamiState = "loading";
-      renderTsunamiStatus();
+      state[stateKey] = "loading";
+      renderTsunami();
 
       var historyRequests = [];
-      for (var page = 1; page <= TSUNAMI_HISTORY_PAGES; page += 1) {
-        historyRequests.push(TSUNAMI_HISTORY_URL + "&page=" + page);
+      if (historyMode) {
+        for (var page = 1; page <= TSUNAMI_HISTORY_PAGES; page += 1) historyRequests.push(TSUNAMI_HISTORY_URL + "&page=" + page);
       }
-
-      var alertRequests = TSUNAMI_ALERT_TIERS.map(function(tier) {
+      var alertRequests = historyMode ? [] : TSUNAMI_ALERT_TIERS.map(function(tier) {
         return "https://api.weather.gov/alerts/active?event=" + encodeURIComponent(tier);
       });
-
       function getJson(url) {
-        return fetch(url)
-          .then(function(response) {
-            if (!response.ok) throw new Error("HTTP " + response.status);
-            return response.json();
-          })
-          .then(function(payload) {
-            if (payload && payload.error) throw new Error(payload.error.message || "service error");
-            return payload;
-          })
-          .catch(function() { return null; });
+        return fetch(url).then(function(response) {
+          if (!response.ok) throw new Error("HTTP " + response.status);
+          return response.json();
+        }).then(function(payload) {
+          if (!payload || payload.error) throw new Error("service error");
+          if (historyMode ? !Array.isArray(payload.items) : !Array.isArray(payload.features)) throw new Error("malformed feed");
+          return payload;
+        }).catch(function() { return null; });
       }
-
-      var settled = await Promise.all(
-        historyRequests.map(getJson)
-          .concat(alertRequests.map(getJson))
-          .concat([getJson(TSUNAMI_WWA_URL)])
-      );
-
-      var historyPayloads = settled.slice(0, historyRequests.length);
-      var alertPayloads = settled.slice(historyRequests.length, historyRequests.length + alertRequests.length);
-      var wwaPayload = settled[settled.length - 1];
-
-      var history = [];
-      var totalHistory = null;
-      var historyFailed = 0;
-      historyPayloads.forEach(function(payload) {
-        if (!payload) { historyFailed += 1; return; }
-        if (totalHistory == null && typeof payload.totalItems === "number") totalHistory = payload.totalItems;
-        (payload.items || []).forEach(function(item) { history.push(item); });
-      });
-
-      var alerts = [];
-      var alertsFailed = 0;
-      alertPayloads.forEach(function(payload) {
-        if (!payload) { alertsFailed += 1; return; }
-        (payload.features || []).forEach(function(feature) { alerts.push(feature); });
-      });
-
-      state.tsunamiData = {
-        history:history,
-        totalHistory:totalHistory,
-        historyFailed:historyFailed,
-        alerts:alerts,
-        alertsFailed:alertsFailed,
-        warningPolygons:wwaPayload && wwaPayload.features ? wwaPayload.features : null
-      };
-      state.tsunamiFetchedAt = Date.now();
-      // Only a total wipe-out is an error. A partial result still draws something
-      // real, and the status line says exactly how much of it is missing.
-      state.tsunamiState =
-        (historyFailed === historyRequests.length && alertsFailed === alertRequests.length)
-          ? "error" : "ready";
+      var requests = historyMode ? historyRequests : alertRequests.concat([TSUNAMI_WWA_URL]);
+      var settled = await Promise.all(requests.map(getJson));
+      var data = state.tsunamiData || {};
+      var failed = settled.filter(function(payload) { return !payload; }).length;
+      if (historyMode) {
+        data.history = [];
+        data.totalHistory = null;
+        data.historyFailed = failed;
+        settled.forEach(function(payload) {
+          if (!payload) return;
+          if (data.totalHistory == null && typeof payload.totalItems === "number") data.totalHistory = payload.totalItems;
+          payload.items.forEach(function(item) { data.history.push(item); });
+        });
+      } else {
+        data.alerts = [];
+        data.alertsFailed = failed;
+        settled.slice(0, alertRequests.length).forEach(function(payload) {
+          if (!payload) return;
+          payload.features.forEach(function(feature) {
+            var expires = feature.properties && feature.properties.expires;
+            if (!expires || Date.parse(expires) > Date.now()) data.alerts.push(feature);
+          });
+        });
+        var wwa = settled[settled.length - 1];
+        data.warningPolygons = wwa ? wwa.features : null;
+      }
+      state.tsunamiData = data;
+      state[cacheKey] = Date.now();
+      state[stateKey] = failed === requests.length ? "error" : "ready";
+      // A late response fills its own cache; only the currently selected mode is drawn.
       renderTsunami();
     }
 
@@ -3358,38 +3347,44 @@ ${solarClientSource()}
       var element = document.getElementById("tsunamiStatus");
       if (!element) return;
       if (!state.tsunami) { element.textContent = ""; element.setAttribute("data-tone","normal"); return; }
-      if (state.tsunamiState === "loading") {
+      var historyMode = state.tsunamiParts === "history";
+      var status = state[historyMode ? "tsunamiHistoryState" : "tsunamiLiveState"];
+      if (status === "loading") {
         element.setAttribute("data-tone","normal");
-        element.textContent = "Loading tsunami warnings and the NCEI historical record...";
+        element.textContent = historyMode ? "Loading historical source records — not active alerts..." : "Loading current NWS tsunami alerts...";
         return;
       }
-      if (state.tsunamiState === "error") {
+      if (status === "error") {
         element.setAttribute("data-tone","error");
         element.textContent = "Tsunami data unavailable. This is a failed request, not an absence of tsunamis.";
         return;
       }
-      if (state.tsunamiState !== "ready") { element.textContent = ""; return; }
+      if (status !== "ready") { element.textContent = ""; return; }
       var data = state.tsunamiData || {};
+      if (historyMode) {
+        var shown = (data.history || []).length;
+        var total = data.totalHistory;
+        element.setAttribute("data-tone","normal");
+        element.textContent = "HISTORICAL ARCHIVE — not active alerts. Showing " + shown +
+          (total != null && total > shown ? " of " + total : "") +
+          " recorded tsunamis since 1900 that produced a wave of at least 1 m. These records are not attributed to current earthquakes." +
+          (data.historyFailed ? " " + data.historyFailed + " history page(s) failed to load." : "");
+        return;
+      }
       var alertCount = (data.alerts || []).length;
-      var shown = (data.history || []).length;
-      var total = data.totalHistory;
-      var parts = [];
-      if (alertCount) {
+      var polygonCount = (data.warningPolygons || []).length;
+      if (alertCount || polygonCount) {
         element.setAttribute("data-tone","error");
-        parts.push(alertCount + " active tsunami " + (alertCount === 1 ? "alert" : "alerts") + " in force.");
+        element.textContent = alertCount + " current NWS tsunami alert(s); " + polygonCount + " current warning polygon(s). Inspect the official agency record.";
+      } else if (data.alertsFailed) {
+        element.setAttribute("data-tone","error");
+        element.textContent = "Current alert coverage is incomplete. Failed feeds are not an all-clear.";
       } else {
         element.setAttribute("data-tone","empty");
-        // The single most important sentence in this layer.
-        parts.push("No active tsunami warning, advisory or watch anywhere in the NWS system. The feed answered and it was empty.");
+        element.textContent = "No active tsunami warning, advisory or watch returned by the NWS feeds. The feed answered and it was empty. This is not a global all-clear.";
       }
-      if (shown) {
-        // Never let a capped list read as the whole record.
-        parts.push("Showing " + shown + (total != null && total > shown ? " of " + total : "") +
-          " recorded tsunamis since 1900 that produced a wave of at least 1 m.");
-      }
-      if (data.historyFailed) parts.push(data.historyFailed + " history page(s) failed to load.");
-      if (data.alertsFailed) parts.push(data.alertsFailed + " alert feed(s) failed to load.");
-      element.textContent = parts.join(" ");
+      if (data.alertsFailed) element.textContent += " " + data.alertsFailed + " live feed(s) failed to load.";
+      element.textContent += " Historical records are hidden; no attribution to a nearby earthquake is inferred.";
     }
 
     function renderTsunami() {
@@ -3397,10 +3392,11 @@ ${solarClientSource()}
       tsunamiHistoryLayer.clearLayers();
       renderTsunamiStatus();
       if (!state.tsunami || !state.tsunamiData) return;
+      if (state[state.tsunamiParts === "history" ? "tsunamiHistoryState" : "tsunamiLiveState"] !== "ready") return;
       var data = state.tsunamiData;
       var parts = state.tsunamiParts;
-      var showLive = parts === "all" || parts === "live";
-      var showHistory = parts === "all" || parts === "history";
+      var showLive = parts === "live";
+      var showHistory = parts === "history";
 
       if (showLive) {
         (data.warningPolygons || []).forEach(function(feature) {
@@ -3451,7 +3447,8 @@ ${solarClientSource()}
       var deaths = tsunamiNumber(item.deathsTotal);
       var magnitude = tsunamiNumber(item.eqMagnitude);
       var runups = tsunamiNumber(item.numRunups);
-      return '<div class="popup-title">' + esc(item.locationName || item.country || "Tsunami") + "</div>" +
+      return '<div class="popup-note"><strong>HISTORICAL RECORD — NOT AN ACTIVE ALERT</strong></div>' +
+        '<div class="popup-title">' + esc(item.locationName || item.country || "Tsunami") + "</div>" +
         '<div class="popup-row"><strong>' + esc(when || "Date not reported") + "</strong>" +
           (item.country ? " &middot; " + esc(item.country) : "") + "</div>" +
         '<div class="popup-row">Largest wave measured: <strong>' +
@@ -3589,13 +3586,16 @@ ${solarClientSource()}
     });
     document.getElementById("tsunamiLayer").addEventListener("change",function(event) {
       state.tsunami = event.target.checked;
+      // Re-enabling the live toggle always returns to current alerts, even after an archive visit.
+      state.tsunamiParts = "live";
+      document.getElementById("tsunamiParts").value = "live";
       document.getElementById("tsunamiControls").hidden = !state.tsunami;
       if (state.tsunami) loadTsunami(false);
       else renderTsunami();
     });
     document.getElementById("tsunamiParts").addEventListener("change",function(event) {
-      state.tsunamiParts = event.target.value;
-      renderTsunami();
+      state.tsunamiParts = event.target.value === "history" ? "history" : "live";
+      loadTsunami(false);
     });
     // Any movement the page did not initiate means a person is driving the map.
     map.on("movestart zoomstart",function() {
