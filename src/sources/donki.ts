@@ -4,17 +4,22 @@ import type { NormalizedEvent } from "../types.js";
 export const DONKI_KINDS = ["CME", "FLR", "GST", "IPS", "SEP", "HSS"] as const;
 export type DonkiKind = (typeof DONKI_KINDS)[number];
 
-export function donkiUrl(kind: DonkiKind, startDate: Date, endDate: Date, apiKey = "DEMO_KEY"): string {
+// CCMC moved DONKI on 2026-09-30: api.nasa.gov/DONKI/* now 301s to an HTML news page, which a
+// redirect-following fetch read as 200 and parsed as no data (dark for 15 days, every run "success").
+// The CCMC web service takes no API key; paths after /DONKI/ are unchanged.
+export const DONKI_BASE = "https://ccmc.gsfc.nasa.gov/DONKI/WS/get";
+
+export function donkiUrl(kind: DonkiKind, startDate: Date, endDate: Date): string {
   const query = new URLSearchParams({
     startDate: startDate.toISOString().slice(0, 10),
-    endDate: endDate.toISOString().slice(0, 10),
-    api_key: apiKey
+    endDate: endDate.toISOString().slice(0, 10)
   });
-  return `https://api.nasa.gov/DONKI/${kind}?${query.toString()}`;
+  return `${DONKI_BASE}/${kind}?${query.toString()}`;
 }
 
+// `_apiKey` is kept for the worker's call signature; the CCMC endpoint does not use one.
 export async function fetchDonkiEvents(
-  apiKey = "DEMO_KEY",
+  _apiKey?: string,
   now = new Date(),
   kinds: readonly DonkiKind[] = DONKI_KINDS
 ): Promise<NormalizedEvent[]> {
@@ -22,14 +27,22 @@ export async function fetchDonkiEvents(
   const startDate = new Date(now.getTime() - 7 * 24 * 3_600_000);
   const batches = await Promise.allSettled(
     kinds.map(async (kind) => {
-      const rows = await fetchDonkiRows(kind, donkiUrl(kind, startDate, endDate, apiKey));
+      const rows = await fetchDonkiRows(kind, donkiUrl(kind, startDate, endDate));
       return rows.map((row) => normalizeDonkiEvent(kind, row, now));
     })
   );
+  const failures: string[] = [];
   for (const [index, batch] of batches.entries()) {
     if (batch.status === "rejected") {
-      console.error(batch.reason instanceof Error ? batch.reason.message : `NASA DONKI ${kinds[index]} failed`);
+      const message = batch.reason instanceof Error ? batch.reason.message : String(batch.reason);
+      const line = message.startsWith("NASA DONKI") ? message : `NASA DONKI ${kinds[index]}: ${message}`;
+      failures.push(line);
+      console.error(line);
     }
+  }
+  // Every kind failing is an outage, not an empty week: reject so the source run records "error".
+  if (kinds.length > 0 && failures.length === kinds.length) {
+    throw new Error(`NASA DONKI: all ${kinds.length} kinds failed (${failures.join("; ")})`.slice(0, 600));
   }
   return batches.flatMap((batch) => (batch.status === "fulfilled" ? batch.value : []));
 }
@@ -38,9 +51,21 @@ async function fetchDonkiRows(kind: DonkiKind, url: string, maxAttempts = 3): Pr
   let lastError: Error | undefined;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    const response = await fetch(url, { cache: "no-store" });
+    // Do not follow redirects: a moved endpoint must fail loudly, not resolve to someone's HTML page.
+    const response = await fetch(url, { cache: "no-store", redirect: "manual" });
+    if (response.status >= 300 && response.status < 400) {
+      throw new Error(`NASA DONKI ${kind} moved: ${response.status} -> ${response.headers.get("location") ?? "(no location)"}`);
+    }
     if (response.ok) {
-      return (await response.json()) as Record<string, unknown>[];
+      const contentType = response.headers.get("content-type") ?? "";
+      if (!contentType.includes("json")) {
+        throw new Error(`NASA DONKI ${kind} returned ${contentType || "no content-type"}, not JSON`);
+      }
+      const body: unknown = await response.json();
+      if (!Array.isArray(body)) {
+        throw new Error(`NASA DONKI ${kind} returned ${body === null ? "null" : typeof body}, not an array`);
+      }
+      return body as Record<string, unknown>[];
     }
 
     lastError = new Error(`NASA DONKI ${kind} failed: ${response.status} ${response.statusText}`);
@@ -69,7 +94,7 @@ export function normalizeDonkiEvent(kind: string, raw: Record<string, unknown>, 
     sourceUpdatedAt,
     ingestTime,
     severity: kind === "FLR" && classType ? classType : kind,
-    officialUrl: typeof raw.link === "string" ? raw.link : "https://api.nasa.gov/DONKI/",
+    officialUrl: typeof raw.link === "string" ? raw.link : "https://ccmc.gsfc.nasa.gov/DONKI/",
     rawJson: raw
   };
 }
