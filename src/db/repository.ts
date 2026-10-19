@@ -6,18 +6,52 @@ export interface EventUpsertResult {
   status: "inserted" | "updated" | "unchanged";
 }
 
+// Read bounds for the page snapshot. Rows inside [fullSince, fullUntil] by
+// event_time, or ingested since recentIngestSince, come back whole. Earthquakes
+// older than fullSince but inside historySince come back WITHOUT raw_json: the
+// regional activity history needs their time, region and magnitude only, and
+// detoasting raw_json for a year of catalogue rows is what ran the instance out
+// of memory. A row that qualifies as whole by any rule below is returned
+// whole, once. Omit the query to read everything (worker paths).
+//
+// Also whole: any event a cascade state points at, when that state was written
+// since recentIngestSince or is its region's latest. An unchanged event keeps
+// its old ingest_time while its state is rewritten every cycle (a volcano
+// elevated for months), and the region panel reads that event.
+//
+// And whole: the newest `newestIngested` live rows by ingest_time in each of
+// the two page lists (regional, and region-less or comparator), ties at the
+// cut included, because those lists are top-N by ingest_time at any age.
+export interface EventQuery {
+  fullSince: Date;
+  fullUntil: Date;
+  recentIngestSince: Date;
+  historySince?: Date;
+  newestIngested?: number;
+}
+
+export interface SourceRunQuery {
+  latestPerSource: number;
+}
+
+// Every notification sent since `since`, plus the newest `limit` regardless.
+export interface NotificationQuery {
+  since: Date;
+  limit: number;
+}
+
 export interface WatcherRepository {
   startSourceRun(source: string, startedAt?: Date): Promise<SourceRun>;
   finishSourceRun(id: string, result: { status: "success" | "error"; recordsSeen: number; error?: string; completedAt?: Date }): Promise<void>;
-  listSourceRuns(): Promise<SourceRun[]>;
+  listSourceRuns(query?: SourceRunQuery): Promise<SourceRun[]>;
   upsertEvent(event: NormalizedEvent): Promise<EventUpsertResult>;
-  listEvents(): Promise<NormalizedEvent[]>;
+  listEvents(query?: EventQuery): Promise<NormalizedEvent[]>;
   saveWatchWindow(window: WatchWindow): Promise<void>;
   listWatchWindows(): Promise<WatchWindow[]>;
   saveCascadeState(state: CascadeState): Promise<void>;
   listCascadeStates(): Promise<CascadeState[]>;
   saveNotification(notification: NotificationRecord): Promise<void>;
-  listNotifications(): Promise<NotificationRecord[]>;
+  listNotifications(query?: NotificationQuery): Promise<NotificationRecord[]>;
   saveRegionBaseline(baseline: RegionBaseline): Promise<void>;
   listRegionBaselines(): Promise<RegionBaseline[]>;
 }
@@ -60,8 +94,18 @@ export class InMemoryWatcherRepository implements WatcherRepository {
     });
   }
 
-  async listSourceRuns(): Promise<SourceRun[]> {
-    return [...this.sourceRuns.values()];
+  async listSourceRuns(query?: SourceRunQuery): Promise<SourceRun[]> {
+    const all = [...this.sourceRuns.values()];
+    if (!query) {
+      return all;
+    }
+    const bySource = new Map<string, SourceRun[]>();
+    for (const run of all) {
+      bySource.set(run.source, [...(bySource.get(run.source) ?? []), run]);
+    }
+    return [...bySource.values()].flatMap((runs) =>
+      runs.sort((a, b) => b.startedAt.getTime() - a.startedAt.getTime()).slice(0, query.latestPerSource)
+    );
   }
 
   async upsertEvent(event: NormalizedEvent): Promise<EventUpsertResult> {
@@ -78,8 +122,22 @@ export class InMemoryWatcherRepository implements WatcherRepository {
     return { event, status: existing ? "updated" : "inserted" };
   }
 
-  async listEvents(): Promise<NormalizedEvent[]> {
-    return [...this.eventsBySourceExternalId.values()];
+  async listEvents(query?: EventQuery): Promise<NormalizedEvent[]> {
+    const all = [...this.eventsBySourceExternalId.values()];
+    if (!query) {
+      return all;
+    }
+    const referenced = stateReferencedEventIds([...this.states.values()], query.recentIngestSince);
+    const newestCut = newestIngestCuts(all, query.newestIngested ?? 0);
+    return all.flatMap((event) => {
+      if (isFullRow(event, query) || referenced.has(event.id) || isNewestIngested(event, newestCut)) {
+        return [event];
+      }
+      if (isHistoryRow(event, query)) {
+        return [{ ...event, rawJson: null }];
+      }
+      return [];
+    });
   }
 
   async saveWatchWindow(window: WatchWindow): Promise<void> {
@@ -105,8 +163,13 @@ export class InMemoryWatcherRepository implements WatcherRepository {
     }
   }
 
-  async listNotifications(): Promise<NotificationRecord[]> {
-    return [...this.notifications.values()];
+  async listNotifications(query?: NotificationQuery): Promise<NotificationRecord[]> {
+    const all = [...this.notifications.values()];
+    if (!query) {
+      return all;
+    }
+    const sorted = all.sort((a, b) => b.sentAt.getTime() - a.sentAt.getTime());
+    return sorted.filter((notification, index) => index < query.limit || notification.sentAt >= query.since);
   }
 
   async saveRegionBaseline(baseline: RegionBaseline): Promise<void> {
@@ -116,4 +179,57 @@ export class InMemoryWatcherRepository implements WatcherRepository {
   async listRegionBaselines(): Promise<RegionBaseline[]> {
     return [...this.baselines.values()];
   }
+}
+
+export function isFullRow(event: NormalizedEvent, query: EventQuery): boolean {
+  return (
+    (event.eventTime >= query.fullSince && event.eventTime <= query.fullUntil) ||
+    event.ingestTime >= query.recentIngestSince
+  );
+}
+
+export function stateReferencedEventIds(states: CascadeState[], recentSince: Date): Set<string> {
+  const latestByRegion = new Map<string, number>();
+  for (const state of states) {
+    latestByRegion.set(state.region, Math.max(latestByRegion.get(state.region) ?? -Infinity, state.stageStartedAt.getTime()));
+  }
+  return new Set(
+    states
+      .filter(
+        (state) =>
+          state.stageStartedAt >= recentSince || state.stageStartedAt.getTime() === latestByRegion.get(state.region)
+      )
+      .map((state) => state.latestEventId)
+  );
+}
+
+export function isRegionlessListEvent(event: NormalizedEvent): boolean {
+  return !event.region || event.region === "CARIBBEAN_VENEZUELA_COMPARATOR";
+}
+
+function newestIngestCuts(events: NormalizedEvent[], count: number): { regional: number; regionless: number } {
+  const cut = (rows: NormalizedEvent[]) => {
+    if (count <= 0) return Infinity;
+    const times = rows.map((event) => event.ingestTime.getTime()).sort((a, b) => b - a);
+    return times.length === 0 ? Infinity : times[Math.min(count, times.length) - 1];
+  };
+  const live = events.filter((event) => event.source !== "usgs_fdsn_backfill");
+  return {
+    regional: cut(live.filter((event) => !isRegionlessListEvent(event))),
+    regionless: cut(live.filter(isRegionlessListEvent))
+  };
+}
+
+function isNewestIngested(event: NormalizedEvent, cut: { regional: number; regionless: number }): boolean {
+  if (event.source === "usgs_fdsn_backfill") return false;
+  return event.ingestTime.getTime() >= (isRegionlessListEvent(event) ? cut.regionless : cut.regional);
+}
+
+export function isHistoryRow(event: NormalizedEvent, query: EventQuery): boolean {
+  return (
+    query.historySince !== undefined &&
+    event.eventType === "earthquake" &&
+    event.eventTime >= query.historySince &&
+    event.eventTime < query.fullSince
+  );
 }

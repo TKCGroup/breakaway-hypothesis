@@ -76,3 +76,14 @@ CREATE TABLE IF NOT EXISTS notifications (
   body TEXT NOT NULL,
   dedupe_key TEXT NOT NULL UNIQUE
 );
+
+-- Time indexes (10-15 evidence: no index on any time column; every page read
+-- was a seq scan plus a disk-spilling sort). IF NOT EXISTS keeps boot-time
+-- migration idempotent.
+CREATE INDEX IF NOT EXISTS events_event_time_idx ON events (event_time DESC);
+CREATE INDEX IF NOT EXISTS events_ingest_time_idx ON events (ingest_time DESC);
+CREATE INDEX IF NOT EXISTS events_type_event_time_idx ON events (event_type, event_time DESC);
+CREATE INDEX IF NOT EXISTS source_runs_source_started_at_idx ON source_runs (source, started_at DESC);
+CREATE INDEX IF NOT EXISTS cascade_states_region_started_at_idx ON cascade_states (region, stage_started_at DESC);
+CREATE INDEX IF NOT EXISTS cascade_states_started_at_idx ON cascade_states (stage_started_at DESC);
+CREATE INDEX IF NOT EXISTS notifications_sent_at_idx ON notifications (sent_at DESC);

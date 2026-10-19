@@ -254,18 +254,67 @@ export interface DashboardSnapshot {
   baselines: RegionBaseline[];
 }
 
+// Every read here used to be `SELECT *` with no WHERE or LIMIT. /api/earth
+// detoasted every event's raw_json on every page load (3.8 MB out, 30-96 s,
+// and two overlapping loads killed the instance with a V8 heap OOM on 10-15).
+// The bounds below are derived from what the page actually reads, so the
+// output is unchanged: see tests/boundedSnapshot.test.ts, which builds both
+// pages from a full and a bounded snapshot and requires them to be equal.
+export const SNAPSHOT_EVENT_WINDOW_DAYS = 31;
+export const SNAPSHOT_RUNS_PER_SOURCE = 200;
+export const SNAPSHOT_NOTIFICATION_LIMIT = 500;
+
 export async function loadDashboardSnapshot(
-  repo: WatcherRepository
+  repo: WatcherRepository,
+  now = new Date(),
+  options: { bounded?: boolean } = {}
 ): Promise<DashboardSnapshot> {
-  const [events, sourceRuns, cascadeStates, notifications, windows, baselines] =
-    await Promise.all([
-      repo.listEvents(),
-      repo.listSourceRuns(),
-      repo.listCascadeStates(),
-      repo.listNotifications(),
-      repo.listWatchWindows(),
-      repo.listRegionBaselines()
-    ]);
+  if (options.bounded === false) {
+    const [events, sourceRuns, cascadeStates, notifications, windows, baselines] =
+      await Promise.all([
+        repo.listEvents(),
+        repo.listSourceRuns(),
+        repo.listCascadeStates(),
+        repo.listNotifications(),
+        repo.listWatchWindows(),
+        repo.listRegionBaselines()
+      ]);
+    return { events, sourceRuns, cascadeStates, notifications, windows, baselines };
+  }
+
+  const [sourceRuns, baselines] = await Promise.all([
+    repo.listSourceRuns({ latestPerSource: SNAPSHOT_RUNS_PER_SOURCE }),
+    repo.listRegionBaselines()
+  ]);
+  const dayMs = 86_400_000;
+  // The latest-cycle summary counts events by ingest_time inside the newest
+  // cycle, however old that cycle is. Reach back to an hour before it.
+  const latestRunStartedAt = Math.max(-Infinity, ...sourceRuns.map((run) => run.startedAt.getTime()));
+  const recentIngestSince = new Date(
+    Math.min(now.getTime() - 2 * dayMs, Number.isFinite(latestRunStartedAt) ? latestRunStartedAt - 3_600_000 : Infinity)
+  );
+  // Regional activity reads earthquakes back to its longest baseline window.
+  const longestBaselineDays = Math.max(
+    0,
+    ...baselines.filter((baseline) => baseline.metric === "earthquakes_count_24h").map((baseline) => baseline.windowDays)
+  );
+  const fullSince = new Date(now.getTime() - SNAPSHOT_EVENT_WINDOW_DAYS * dayMs);
+  const [events, cascadeStates, notifications, windows] = await Promise.all([
+    repo.listEvents({
+      fullSince,
+      fullUntil: new Date(now.getTime() + SNAPSHOT_EVENT_WINDOW_DAYS * dayMs),
+      recentIngestSince,
+      historySince: longestBaselineDays > 0 ? new Date(now.getTime() - (longestBaselineDays + 1) * dayMs) : undefined,
+      // recentEvents shows 24, filteredOfficialEvents 12, both newest-ingested.
+      newestIngested: 24
+    }),
+    repo.listCascadeStates(),
+    repo.listNotifications({
+      since: new Date(Math.min(now.getTime() - dayMs, recentIngestSince.getTime())),
+      limit: SNAPSHOT_NOTIFICATION_LIMIT
+    }),
+    repo.listWatchWindows()
+  ]);
 
   return {
     events,
@@ -283,7 +332,7 @@ export async function buildDashboardData(
   now = new Date()
 ): Promise<DashboardData> {
   return buildDashboardDataFromSnapshot(
-    await loadDashboardSnapshot(repo),
+    await loadDashboardSnapshot(repo, now),
     config,
     now
   );

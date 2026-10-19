@@ -10,7 +10,13 @@ import type {
   SourceRun,
   WatchWindow
 } from "../types.js";
-import type { EventUpsertResult, WatcherRepository } from "./repository.js";
+import type {
+  EventQuery,
+  EventUpsertResult,
+  NotificationQuery,
+  SourceRunQuery,
+  WatcherRepository
+} from "./repository.js";
 
 interface EventRow {
   id: string;
@@ -86,6 +92,26 @@ interface SourceRunRow {
   error: string | null;
 }
 
+const COMPARATOR_REGION = "CARIBBEAN_VENEZUELA_COMPARATOR";
+
+const EVENT_COLUMNS = [
+  "id",
+  "source",
+  "external_id",
+  "event_type",
+  "region",
+  "title",
+  "event_time",
+  "source_updated_at",
+  "ingest_time",
+  "lat",
+  "lon",
+  "depth_km",
+  "magnitude",
+  "severity",
+  "official_url"
+].join(", ");
+
 export class PostgresWatcherRepository implements WatcherRepository {
   constructor(private readonly pool: Pool) {}
 
@@ -127,10 +153,24 @@ export class PostgresWatcherRepository implements WatcherRepository {
     );
   }
 
-  async listSourceRuns(): Promise<SourceRun[]> {
-    return rows(await this.pool.query<SourceRunRow>(`SELECT * FROM source_runs ORDER BY started_at DESC`)).map(
-      sourceRunFromRow
-    );
+  async listSourceRuns(query?: SourceRunQuery): Promise<SourceRun[]> {
+    if (!query) {
+      return rows(await this.pool.query<SourceRunRow>(`SELECT * FROM source_runs ORDER BY started_at DESC`)).map(
+        sourceRunFromRow
+      );
+    }
+    return rows(
+      await this.pool.query<SourceRunRow>(
+        `SELECT id, source, started_at, completed_at, status, records_seen, error
+         FROM (
+           SELECT *, row_number() OVER (PARTITION BY source ORDER BY started_at DESC) AS rn
+           FROM source_runs
+         ) ranked
+         WHERE rn <= $1
+         ORDER BY started_at DESC`,
+        [query.latestPerSource]
+      )
+    ).map(sourceRunFromRow);
   }
 
   async upsertEvent(event: NormalizedEvent): Promise<EventUpsertResult> {
@@ -187,8 +227,52 @@ export class PostgresWatcherRepository implements WatcherRepository {
     return { event, status: existingEvent ? "updated" : "inserted" };
   }
 
-  async listEvents(): Promise<NormalizedEvent[]> {
-    return rows(await this.pool.query<EventRow>(`SELECT * FROM events ORDER BY event_time DESC`)).map(eventFromRow);
+  async listEvents(query?: EventQuery): Promise<NormalizedEvent[]> {
+    if (!query) {
+      return rows(await this.pool.query<EventRow>(`SELECT * FROM events ORDER BY event_time DESC`)).map(eventFromRow);
+    }
+    // One pass, each row at most once: `whole` rows keep raw_json, history
+    // rows (old earthquakes inside the baseline window) come back without it.
+    // Mirrors InMemoryWatcherRepository.listEvents; the parity test pins both.
+    const newest = Math.max(0, Math.floor(query.newestIngested ?? 0));
+    return rows(
+      await this.pool.query<EventRow>(
+        `WITH referenced AS (
+           SELECT latest_event_id AS id FROM cascade_states WHERE stage_started_at >= $3
+           UNION
+           SELECT cs.latest_event_id FROM cascade_states cs
+           JOIN (SELECT region, max(stage_started_at) AS latest FROM cascade_states GROUP BY region) r
+             ON r.region = cs.region AND r.latest = cs.stage_started_at
+         ),
+         cuts AS (
+           SELECT
+             -- Fewer rows than the cut means every row is in the list: -infinity.
+             COALESCE((SELECT ingest_time FROM events
+              WHERE source <> 'usgs_fdsn_backfill' AND (region IS NULL OR region = '${COMPARATOR_REGION}')
+              ORDER BY ingest_time DESC OFFSET GREATEST($5::int - 1, 0) LIMIT 1), '-infinity'::timestamptz) AS regionless,
+             COALESCE((SELECT ingest_time FROM events
+              WHERE source <> 'usgs_fdsn_backfill' AND region IS NOT NULL AND region <> '${COMPARATOR_REGION}'
+              ORDER BY ingest_time DESC OFFSET GREATEST($5::int - 1, 0) LIMIT 1), '-infinity'::timestamptz) AS regional
+         ),
+         marked AS (
+           SELECT e.*, (
+             (e.event_time >= $1 AND e.event_time <= $2)
+             OR e.ingest_time >= $3
+             OR e.id IN (SELECT id FROM referenced)
+             OR ($5::int > 0 AND e.source <> 'usgs_fdsn_backfill' AND e.ingest_time >= CASE
+                  WHEN e.region IS NULL OR e.region = '${COMPARATOR_REGION}' THEN (SELECT regionless FROM cuts)
+                  ELSE (SELECT regional FROM cuts) END)
+           ) AS whole
+           FROM events e
+         )
+         SELECT ${EVENT_COLUMNS}, CASE WHEN whole THEN raw_json ELSE 'null'::jsonb END AS raw_json
+         FROM marked
+         WHERE whole
+            OR ($4::timestamptz IS NOT NULL AND event_type = 'earthquake' AND event_time >= $4 AND event_time < $1)
+         ORDER BY event_time DESC`,
+        [query.fullSince, query.fullUntil, query.recentIngestSince, query.historySince ?? null, newest]
+      )
+    ).map(eventFromRow);
   }
 
   async saveWatchWindow(window: WatchWindow): Promise<void> {
@@ -291,10 +375,23 @@ export class PostgresWatcherRepository implements WatcherRepository {
     );
   }
 
-  async listNotifications(): Promise<NotificationRecord[]> {
-    return rows(await this.pool.query<NotificationRow>(`SELECT * FROM notifications ORDER BY sent_at DESC`)).map(
-      notificationFromRow
-    );
+  async listNotifications(query?: NotificationQuery): Promise<NotificationRecord[]> {
+    if (!query) {
+      return rows(await this.pool.query<NotificationRow>(`SELECT * FROM notifications ORDER BY sent_at DESC`)).map(
+        notificationFromRow
+      );
+    }
+    return rows(
+      await this.pool.query<NotificationRow>(
+        `SELECT * FROM (
+           (SELECT * FROM notifications ORDER BY sent_at DESC LIMIT $1)
+           UNION
+           (SELECT * FROM notifications WHERE sent_at >= $2)
+         ) bounded
+         ORDER BY sent_at DESC`,
+        [query.limit, query.since]
+      )
+    ).map(notificationFromRow);
   }
 
   async saveRegionBaseline(baseline: RegionBaseline): Promise<void> {
