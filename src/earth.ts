@@ -196,6 +196,9 @@ export interface EarthWatchData {
     currentFreshSignals: number;
     activeMapSignals: number;
     mappedSignals: number;
+    // Spatial candidates before the 700-row map cap. mappedSignals is the
+    // count AFTER the cap, so on its own it cannot say anything was cut.
+    spatialCandidates: number;
     nonSpatialSignals: number;
   };
   sources: DashboardData["sources"];
@@ -249,9 +252,8 @@ export function buildEarthWatchData(
         Date.parse(b.eventTime) - Date.parse(a.eventTime)
     );
 
-  const spatialEvents = candidates
-    .filter((event) => event.geometry)
-    .slice(0, 700);
+  const spatialCandidates = candidates.filter((event) => event.geometry);
+  const spatialEvents = spatialCandidates.slice(0, 700);
   const nonSpatialSignals = candidates
     .filter((event) => !event.geometry)
     .slice(0, 40);
@@ -272,6 +274,7 @@ export function buildEarthWatchData(
       currentFreshSignals,
       activeMapSignals,
       mappedSignals: spatialEvents.length,
+      spatialCandidates: spatialCandidates.length,
       nonSpatialSignals: nonSpatialSignals.length
     },
     sources: dashboard.sources,

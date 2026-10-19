@@ -42,3 +42,28 @@ describe("bounded page snapshot", () => {
     expect(JSON.stringify(bounded)).toBe(JSON.stringify(full));
   });
 });
+
+describe("map cap is visible", () => {
+  it("reports spatial candidates before the 700 cap next to mappedSignals", async () => {
+    const { eventFixture } = await import("./helpers.js");
+    const repo = new InMemoryWatcherRepository();
+    for (let index = 0; index < 705; index += 1) {
+      await repo.upsertEvent(
+        eventFixture({
+          id: `cap-${index}`,
+          externalId: `cap-${index}`,
+          // Far apart in place and time, so earthquake alias-dedupe keeps all.
+          eventTime: new Date(NOW.getTime() - index * 600_000),
+          sourceUpdatedAt: new Date(NOW.getTime() - index * 600_000),
+          lat: -60 + (index % 60) * 2,
+          lon: -170 + Math.floor(index / 60) * 25,
+          region: undefined,
+          rawJson: {}
+        })
+      );
+    }
+    const data = buildEarthWatchData(await loadDashboardSnapshot(repo, NOW), DEFAULT_CONFIG, NOW);
+    expect(data.summary.mappedSignals).toBe(700);
+    expect((data.summary as Record<string, unknown>).spatialCandidates).toBe(705);
+  });
+});
