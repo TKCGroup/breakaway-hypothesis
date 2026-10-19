@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { fileURLToPath } from "node:url";
 import { loadConfig, type WatcherConfig } from "./config.js";
-import { createRepository, type RepositoryHandle } from "./db/createRepository.js";
+import { closeSharedRepositories, sharedRepository, type RepositoryHandle } from "./db/createRepository.js";
 import { runMigrations } from "./db/migrations.js";
 import {
   buildDashboardData,
@@ -131,7 +131,7 @@ async function handleEarthApi(req: IncomingMessage, res: ServerResponse, context
 export function createWatcherServer(options: WatcherServerOptions = {}) {
   const context: ServerContext = {
     config: options.config ?? config,
-    createRepositoryHandle: options.createRepositoryHandle ?? createRepository
+    createRepositoryHandle: options.createRepositoryHandle ?? (() => sharedRepository())
   };
 
   return createServer((req, res) => {
@@ -316,8 +316,12 @@ async function start(): Promise<void> {
     await runMigrations(process.env.DATABASE_URL);
   }
 
-  createWatcherServer().listen(port, () => {
+  const server = createWatcherServer().listen(port, () => {
     console.log(`geospace watcher listening on :${port}`);
+  });
+  process.once("SIGTERM", () => {
+    server.close();
+    void closeSharedRepositories();
   });
 }
 

@@ -1,4 +1,4 @@
-import { Pool, type QueryResult, type QueryResultRow } from "pg";
+import { Pool, type PoolConfig, type QueryResult, type QueryResultRow } from "pg";
 import { stableEventDedupeKey } from "../logic/staleGate.js";
 import type {
   CascadeState,
@@ -90,7 +90,7 @@ export class PostgresWatcherRepository implements WatcherRepository {
   constructor(private readonly pool: Pool) {}
 
   static fromConnectionString(databaseUrl: string): PostgresWatcherRepository {
-    return new PostgresWatcherRepository(new Pool({ connectionString: databaseUrl, max: 5 }));
+    return new PostgresWatcherRepository(new Pool(poolConfig(databaseUrl)));
   }
 
   async close(): Promise<void> {
@@ -323,6 +323,21 @@ export class PostgresWatcherRepository implements WatcherRepository {
       )
     ).map(regionBaselineFromRow);
   }
+}
+
+// `application_name` makes this service's sessions attributable in
+// pg_stat_activity (they were anonymous). `statement_timeout` bounds a query
+// server-side, so a slow page read releases its connection instead of holding
+// it for the full Cloud Run request timeout.
+export function poolConfig(databaseUrl: string, env: NodeJS.ProcessEnv = process.env): PoolConfig {
+  const statementTimeoutMs = Number(env.PG_STATEMENT_TIMEOUT_MS ?? 20_000);
+  return {
+    connectionString: databaseUrl,
+    max: Number(env.PG_POOL_MAX ?? 5),
+    application_name: env.PG_APPLICATION_NAME ?? "breakaway-watcher",
+    statement_timeout: Number.isFinite(statementTimeoutMs) && statementTimeoutMs > 0 ? statementTimeoutMs : 20_000,
+    idleTimeoutMillis: 30_000
+  };
 }
 
 function rows<T extends QueryResultRow>(result: QueryResult<T>): T[] {
