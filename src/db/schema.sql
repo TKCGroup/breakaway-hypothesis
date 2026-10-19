@@ -93,3 +93,19 @@ CREATE INDEX IF NOT EXISTS notifications_sent_at_idx ON notifications (sent_at D
 ALTER TABLE source_runs ADD COLUMN IF NOT EXISTS records_persisted INTEGER;
 ALTER TABLE source_runs ADD COLUMN IF NOT EXISTS records_unchanged INTEGER;
 ALTER TABLE source_runs ADD COLUMN IF NOT EXISTS records_failed INTEGER;
+
+-- Records an official source sent that the ingest gate refused or could not
+-- parse (10-19). Kept and counted, never dropped silently.
+ALTER TABLE source_runs ADD COLUMN IF NOT EXISTS records_quarantined INTEGER;
+CREATE TABLE IF NOT EXISTS quarantined_records (
+  source TEXT NOT NULL,
+  external_id TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  detail TEXT,
+  first_seen_at TIMESTAMPTZ NOT NULL,
+  last_seen_at TIMESTAMPTZ NOT NULL,
+  times_seen INTEGER NOT NULL DEFAULT 1,
+  raw_json JSONB,
+  PRIMARY KEY (source, external_id, reason)
+);
+CREATE INDEX IF NOT EXISTS quarantined_records_last_seen_idx ON quarantined_records (last_seen_at DESC);

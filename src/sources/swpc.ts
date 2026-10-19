@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { NormalizedEvent } from "../types.js";
+import type { NormalizedEvent, SourceBatch } from "../types.js";
 
 export const SWPC_ENDPOINTS = {
   kp: "https://services.swpc.noaa.gov/products/noaa-planetary-k-index.json",
@@ -77,6 +77,36 @@ function xrayFluxToClass(flux: number): string {
   if (flux >= 1e-6) return `C${formatFlux(flux / 1e-6)}`;
   if (flux >= 1e-7) return `B${formatFlux(flux / 1e-7)}`;
   return `A${formatFlux(flux / 1e-8)}`;
+}
+
+// normalizeSwpcKpRow returns undefined for a row it cannot read, and the
+// fetch above drops those without a count. The worker reads this form, which
+// returns them as rejected so they are counted and kept.
+export async function fetchSwpcKpBatch(now = new Date()): Promise<SourceBatch> {
+  const response = await fetch(SWPC_ENDPOINTS.kp, { cache: "no-store" });
+  if (!response.ok) {
+    throw new Error(`SWPC Kp failed: ${response.status} ${response.statusText}`);
+  }
+  const rows = (await response.json()) as unknown[];
+  if (!Array.isArray(rows)) {
+    throw new Error("SWPC Kp response is not an array");
+  }
+  const dataRows = Array.isArray(rows[0]) ? rows.slice(1) : rows;
+  const batch: SourceBatch = { events: [], rejected: [] };
+  dataRows.forEach((row, index) => {
+    const event = normalizeSwpcKpRow(row, now);
+    if (event) {
+      batch.events.push(event);
+    } else {
+      batch.rejected.push({
+        externalId: `row:${JSON.stringify(row).slice(0, 80)}`,
+        reason: "unparseable_row",
+        detail: `row ${index} has no readable time tag or Kp value`,
+        rawJson: row ?? null
+      });
+    }
+  });
+  return batch;
 }
 
 function formatFlux(value: number): string {

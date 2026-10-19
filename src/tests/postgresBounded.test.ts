@@ -92,4 +92,16 @@ describe.skipIf(!url)("bounded snapshot against real Postgres", () => {
     expect((await repo.upsertEvent(eventFixture({ ...base, rawJson: { mid: "m", zeta: 1, alpha: { b: [3, 1], y: 2 } } }))).status).toBe("unchanged");
     expect((await repo.upsertEvent(eventFixture({ ...base, rawJson: { mid: "m", zeta: 2, alpha: { b: [3, 1], y: 2 } } }))).status).toBe("updated");
   });
+
+  it("keeps one quarantine row per (source, record, reason) and counts repeats", async () => {
+    const pool = (repo as unknown as { pool: { query: (sql: string) => Promise<{ rows: { times_seen: number }[] }> } }).pool;
+    const record = { source: "nasa_eonet", externalId: "EONET_FUTURE", reason: "future_event_time", detail: "16 d ahead", rawJson: { id: "EONET_FUTURE" } };
+    await repo.quarantine({ ...record, seenAt: new Date("2026-07-08T12:00:00.000Z") });
+    await repo.quarantine({ ...record, seenAt: new Date("2026-07-08T12:15:00.000Z") });
+    const held = (await repo.listQuarantine()).filter((item) => item.externalId === "EONET_FUTURE");
+    expect(held).toHaveLength(1);
+    expect(held[0]).toMatchObject({ reason: "future_event_time", rawJson: { id: "EONET_FUTURE" } });
+    const times = await pool.query("SELECT times_seen FROM quarantined_records WHERE external_id = 'EONET_FUTURE'");
+    expect(times.rows[0].times_seen).toBe(2);
+  });
 });

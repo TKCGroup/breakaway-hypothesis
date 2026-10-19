@@ -6,6 +6,7 @@ import type {
   EventType,
   NormalizedEvent,
   NotificationRecord,
+  QuarantineRecord,
   RegionBaseline,
   RegionId,
   SourceRun,
@@ -94,6 +95,7 @@ interface SourceRunRow {
   records_persisted: number | null;
   records_unchanged: number | null;
   records_failed: number | null;
+  records_quarantined: number | null;
   error: string | null;
 }
 
@@ -150,7 +152,7 @@ export class PostgresWatcherRepository implements WatcherRepository {
     await this.pool.query(
       `UPDATE source_runs
        SET completed_at = $2, status = $3, records_seen = $4, error = $5,
-           records_persisted = $6, records_unchanged = $7, records_failed = $8
+           records_persisted = $6, records_unchanged = $7, records_failed = $8, records_quarantined = $9
        WHERE id = $1`,
       [
         id,
@@ -160,7 +162,8 @@ export class PostgresWatcherRepository implements WatcherRepository {
         result.error ?? null,
         result.counts?.persisted ?? null,
         result.counts?.unchanged ?? null,
-        result.counts?.failed ?? null
+        result.counts?.failed ?? null,
+        result.counts?.quarantined ?? null
       ]
     );
   }
@@ -174,7 +177,7 @@ export class PostgresWatcherRepository implements WatcherRepository {
     return rows(
       await this.pool.query<SourceRunRow>(
         `SELECT id, source, started_at, completed_at, status, records_seen, error,
-                records_persisted, records_unchanged, records_failed
+                records_persisted, records_unchanged, records_failed, records_quarantined
          FROM (
            SELECT *, row_number() OVER (PARTITION BY source ORDER BY started_at DESC) AS rn
            FROM source_runs
@@ -437,6 +440,38 @@ export class PostgresWatcherRepository implements WatcherRepository {
       )
     ).map(regionBaselineFromRow);
   }
+
+  async quarantine(record: QuarantineRecord): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO quarantined_records (source, external_id, reason, detail, first_seen_at, last_seen_at, times_seen, raw_json)
+       VALUES ($1, $2, $3, $4, $5, $5, 1, $6)
+       ON CONFLICT (source, external_id, reason) DO UPDATE
+       SET detail = EXCLUDED.detail,
+           last_seen_at = EXCLUDED.last_seen_at,
+           times_seen = quarantined_records.times_seen + 1,
+           raw_json = EXCLUDED.raw_json`,
+      [record.source, record.externalId, record.reason, record.detail ?? null, record.seenAt, JSON.stringify(record.rawJson ?? null)]
+    );
+  }
+
+  async listQuarantine(): Promise<QuarantineRecord[]> {
+    const result = await this.pool.query<{
+      source: string;
+      external_id: string;
+      reason: string;
+      detail: string | null;
+      last_seen_at: Date;
+      raw_json: unknown;
+    }>(`SELECT * FROM quarantined_records ORDER BY last_seen_at DESC LIMIT 500`);
+    return result.rows.map((row) => ({
+      source: row.source,
+      externalId: row.external_id,
+      reason: row.reason,
+      detail: row.detail ?? undefined,
+      seenAt: row.last_seen_at,
+      rawJson: row.raw_json
+    }));
+  }
 }
 
 // `application_name` makes this service's sessions attributable in
@@ -554,6 +589,7 @@ function sourceRunFromRow(row: SourceRunRow): SourceRun {
     recordsPersisted: row.records_persisted ?? undefined,
     recordsUnchanged: row.records_unchanged ?? undefined,
     recordsFailed: row.records_failed ?? undefined,
+    recordsQuarantined: row.records_quarantined ?? undefined,
     error: row.error ?? undefined
   };
 }

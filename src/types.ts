@@ -125,6 +125,7 @@ export interface SourceRun {
   recordsPersisted?: number;
   recordsUnchanged?: number;
   recordsFailed?: number;
+  recordsQuarantined?: number;
   error?: string;
 }
 
@@ -132,6 +133,27 @@ export interface SourceRunCounts {
   persisted: number;
   unchanged: number;
   failed: number;
+  quarantined?: number;
+}
+
+// A record an official source sent that this service will not store as an
+// event: unparseable, or with a time the ingest gate refuses. It is kept,
+// counted and named, never dropped silently.
+export interface RejectedRecord {
+  externalId: string;
+  reason: string;
+  detail?: string;
+  rawJson: unknown;
+}
+
+export interface SourceBatch {
+  events: NormalizedEvent[];
+  rejected: RejectedRecord[];
+}
+
+export interface QuarantineRecord extends RejectedRecord {
+  source: string;
+  seenAt: Date;
 }
 
 export interface NotificationRecord {

@@ -9,11 +9,20 @@ import { fetchDonkiEvents } from "./sources/donki.js";
 import { fetchEonetEvents } from "./sources/eonet.js";
 import { fetchNwsAlerts } from "./sources/nwsAlerts.js";
 import { fetchNhcCurrentStorms } from "./sources/nhcCurrentStorms.js";
-import { fetchSwpcKp } from "./sources/swpc.js";
+import { fetchSwpcKpBatch } from "./sources/swpc.js";
 import { fetchTsunamiFeed } from "./sources/tsunami.js";
-import { fetchUsgsEarthquakeFeed } from "./sources/usgsEarthquake.js";
+import { fetchUsgsEarthquakeBatch } from "./sources/usgsEarthquake.js";
 import { fetchHansElevatedVolcanoes } from "./sources/usgsHans.js";
-import type { NormalizedEvent, NotificationRecord, RegionBaseline, RegionId, WatchWindow } from "./types.js";
+import { ingestRejection } from "./logic/ingestGate.js";
+import type {
+  NormalizedEvent,
+  NotificationRecord,
+  RegionBaseline,
+  RegionId,
+  RejectedRecord,
+  SourceBatch,
+  WatchWindow
+} from "./types.js";
 
 export async function runOnce(now = new Date(), repo: WatcherRepository = new InMemoryWatcherRepository()): Promise<void> {
   const config = loadConfig();
@@ -27,9 +36,9 @@ export async function runOnce(now = new Date(), repo: WatcherRepository = new In
   });
 
   const sourceTasks = [
-    { source: "usgs_earthquake_geojson", run: () => fetchUsgsEarthquakeFeed("all_day", now) },
+    { source: "usgs_earthquake_geojson", run: () => fetchUsgsEarthquakeBatch("all_day", now) },
     { source: "usgs_hans", run: () => fetchHansElevatedVolcanoes(now) },
-    { source: "swpc_kp", run: () => fetchSwpcKp(now) },
+    { source: "swpc_kp", run: () => fetchSwpcKpBatch(now) },
     { source: "nasa_donki", run: () => fetchDonkiEvents(config.nasaApiKey, now) },
     { source: "nasa_eonet", run: () => fetchEonetEvents(now) },
     { source: "nws_alerts", run: () => fetchNwsAlerts(now) },
@@ -47,9 +56,9 @@ export async function runOnce(now = new Date(), repo: WatcherRepository = new In
   const batches = await Promise.allSettled(
     sourceTasks.map(async (task) => {
       const run = await repo.startSourceRun(task.source, now);
-      let fetched: NormalizedEvent[];
+      let batch: SourceBatch;
       try {
-        fetched = await task.run();
+        batch = asBatch(await task.run());
       } catch (error) {
         await repo.finishSourceRun(run.id, {
           status: "error",
@@ -61,9 +70,29 @@ export async function runOnce(now = new Date(), repo: WatcherRepository = new In
       }
 
       const written: NormalizedEvent[] = [];
-      const counts = { persisted: 0, unchanged: 0, failed: 0 };
+      const counts = { persisted: 0, unchanged: 0, failed: 0, quarantined: 0 };
       const failures: string[] = [];
-      for (const event of fetched) {
+      const fetchedCount = batch.events.length + batch.rejected.length;
+      const quarantine = async (rejected: RejectedRecord) => {
+        try {
+          await repo.quarantine({ ...rejected, source: task.source, seenAt: now });
+          counts.quarantined += 1;
+        } catch (error) {
+          counts.failed += 1;
+          if (failures.length < 3) {
+            failures.push(`quarantine ${rejected.externalId}: ${error instanceof Error ? error.message : String(error)}`);
+          }
+        }
+      };
+      for (const rejected of batch.rejected) {
+        await quarantine(rejected);
+      }
+      for (const event of batch.events) {
+        const rejection = ingestRejection(event, now);
+        if (rejection) {
+          await quarantine(rejection);
+          continue;
+        }
         try {
           const result = await repo.upsertEvent(event);
           if (result.status === "unchanged") {
@@ -82,11 +111,11 @@ export async function runOnce(now = new Date(), repo: WatcherRepository = new In
 
       await repo.finishSourceRun(run.id, {
         status: counts.failed > 0 ? "error" : "success",
-        recordsSeen: fetched.length,
+        recordsSeen: fetchedCount,
         counts,
         error:
           counts.failed > 0
-            ? `persist failed for ${counts.failed} of ${fetched.length} records (${failures.join("; ")})`
+            ? `persist failed for ${counts.failed} of ${fetchedCount} records (${failures.join("; ")})`
             : undefined,
         completedAt: new Date()
       });
@@ -156,6 +185,10 @@ export async function runOnce(now = new Date(), repo: WatcherRepository = new In
   for (const failed of batches.filter((batch) => batch.status === "rejected")) {
     console.error((failed as PromiseRejectedResult).reason);
   }
+}
+
+function asBatch(result: NormalizedEvent[] | SourceBatch): SourceBatch {
+  return Array.isArray(result) ? { events: result, rejected: [] } : result;
 }
 
 function isDashboardContextOnly(event: NormalizedEvent): boolean {

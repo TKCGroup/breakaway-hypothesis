@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { matchRegion } from "../logic/regionMatcher.js";
-import type { NormalizedEvent } from "../types.js";
+import type { NormalizedEvent, SourceBatch } from "../types.js";
 
 export const USGS_QUAKE_FEEDS = {
   all_hour: "https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_hour.geojson",
@@ -41,6 +41,37 @@ export async function fetchUsgsEarthquakeFeed(
   }
   const data = (await response.json()) as UsgsCollection;
   return data.features.map((feature) => normalizeUsgsEarthquakeFeature(feature, now));
+}
+
+// One malformed feature used to throw out of the whole map and fail the
+// source's run for every other earthquake in the feed. The worker reads this
+// batch form: each feature that will not normalize is returned as rejected.
+export async function fetchUsgsEarthquakeBatch(
+  feed: keyof typeof USGS_QUAKE_FEEDS = "all_day",
+  now = new Date()
+): Promise<SourceBatch> {
+  const response = await fetch(USGS_QUAKE_FEEDS[feed], { cache: "no-store" });
+  if (!response.ok) {
+    throw new Error(`USGS earthquake feed failed: ${response.status} ${response.statusText}`);
+  }
+  const data = (await response.json()) as UsgsCollection;
+  if (!Array.isArray(data?.features)) {
+    throw new Error("USGS earthquake feed has no features array");
+  }
+  const batch: SourceBatch = { events: [], rejected: [] };
+  data.features.forEach((feature, index) => {
+    try {
+      batch.events.push(normalizeUsgsEarthquakeFeature(feature, now));
+    } catch (error) {
+      batch.rejected.push({
+        externalId: typeof feature?.id === "string" && feature.id ? feature.id : `feature-index:${index}`,
+        reason: "parse_error",
+        detail: error instanceof Error ? error.message : String(error),
+        rawJson: feature ?? null
+      });
+    }
+  });
+  return batch;
 }
 
 export async function fetchUsgsEarthquakeBackfill(

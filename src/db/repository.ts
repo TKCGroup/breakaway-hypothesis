@@ -4,6 +4,7 @@ import type {
   CascadeState,
   NormalizedEvent,
   NotificationRecord,
+  QuarantineRecord,
   RegionBaseline,
   SourceRun,
   SourceRunCounts,
@@ -71,6 +72,8 @@ export interface WatcherRepository {
   listNotifications(query?: NotificationQuery): Promise<NotificationRecord[]>;
   saveRegionBaseline(baseline: RegionBaseline): Promise<void>;
   listRegionBaselines(): Promise<RegionBaseline[]>;
+  quarantine(record: QuarantineRecord): Promise<void>;
+  listQuarantine(): Promise<QuarantineRecord[]>;
 }
 
 export class InMemoryWatcherRepository implements WatcherRepository {
@@ -81,6 +84,7 @@ export class InMemoryWatcherRepository implements WatcherRepository {
   private readonly sourceRuns = new Map<string, SourceRun>();
   private readonly notifications = new Map<string, NotificationRecord>();
   private readonly baselines = new Map<string, RegionBaseline>();
+  private readonly quarantined = new Map<string, QuarantineRecord>();
 
   async startSourceRun(source: string, startedAt = new Date()): Promise<SourceRun> {
     const run: SourceRun = {
@@ -107,6 +111,7 @@ export class InMemoryWatcherRepository implements WatcherRepository {
       recordsPersisted: result.counts?.persisted,
       recordsUnchanged: result.counts?.unchanged,
       recordsFailed: result.counts?.failed,
+      recordsQuarantined: result.counts?.quarantined,
       error: result.error
     });
   }
@@ -199,6 +204,14 @@ export class InMemoryWatcherRepository implements WatcherRepository {
 
   async listRegionBaselines(): Promise<RegionBaseline[]> {
     return [...this.baselines.values()];
+  }
+
+  async quarantine(record: QuarantineRecord): Promise<void> {
+    this.quarantined.set(`${record.source}:${record.externalId}:${record.reason}`, record);
+  }
+
+  async listQuarantine(): Promise<QuarantineRecord[]> {
+    return [...this.quarantined.values()];
   }
 }
 
