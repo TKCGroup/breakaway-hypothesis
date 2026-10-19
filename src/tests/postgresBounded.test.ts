@@ -69,4 +69,18 @@ describe.skipIf(!url)("bounded snapshot against real Postgres", () => {
       expect(names).toContain(index);
     }
   });
+
+  it("stores and reads back the persist counts", async () => {
+    const run = await repo.startSourceRun("count_probe", new Date("2026-07-08T12:30:00.000Z"));
+    await repo.finishSourceRun(run.id, {
+      status: "error",
+      recordsSeen: 5,
+      counts: { persisted: 3, unchanged: 1, failed: 1 },
+      error: "persist failed for 1 of 5 records"
+    });
+    const stored = (await repo.listSourceRuns()).find((item) => item.id === run.id);
+    expect(stored).toMatchObject({ status: "error", recordsSeen: 5, recordsPersisted: 3, recordsUnchanged: 1, recordsFailed: 1 });
+    const bounded = (await repo.listSourceRuns({ latestPerSource: 1 })).find((item) => item.id === run.id);
+    expect(bounded?.recordsPersisted).toBe(3);
+  });
 });

@@ -1,5 +1,13 @@
 import { stableEventDedupeKey } from "../logic/staleGate.js";
-import type { CascadeState, NormalizedEvent, NotificationRecord, RegionBaseline, SourceRun, WatchWindow } from "../types.js";
+import type {
+  CascadeState,
+  NormalizedEvent,
+  NotificationRecord,
+  RegionBaseline,
+  SourceRun,
+  SourceRunCounts,
+  WatchWindow
+} from "../types.js";
 
 export interface EventUpsertResult {
   event: NormalizedEvent;
@@ -40,9 +48,17 @@ export interface NotificationQuery {
   limit: number;
 }
 
+export interface SourceRunResult {
+  status: "success" | "error";
+  recordsSeen: number;
+  counts?: SourceRunCounts;
+  error?: string;
+  completedAt?: Date;
+}
+
 export interface WatcherRepository {
   startSourceRun(source: string, startedAt?: Date): Promise<SourceRun>;
-  finishSourceRun(id: string, result: { status: "success" | "error"; recordsSeen: number; error?: string; completedAt?: Date }): Promise<void>;
+  finishSourceRun(id: string, result: SourceRunResult): Promise<void>;
   listSourceRuns(query?: SourceRunQuery): Promise<SourceRun[]>;
   upsertEvent(event: NormalizedEvent): Promise<EventUpsertResult>;
   listEvents(query?: EventQuery): Promise<NormalizedEvent[]>;
@@ -77,10 +93,7 @@ export class InMemoryWatcherRepository implements WatcherRepository {
     return run;
   }
 
-  async finishSourceRun(
-    id: string,
-    result: { status: "success" | "error"; recordsSeen: number; error?: string; completedAt?: Date }
-  ): Promise<void> {
+  async finishSourceRun(id: string, result: SourceRunResult): Promise<void> {
     const existing = this.sourceRuns.get(id);
     if (!existing) {
       throw new Error(`Unknown source run: ${id}`);
@@ -90,6 +103,9 @@ export class InMemoryWatcherRepository implements WatcherRepository {
       completedAt: result.completedAt ?? new Date(),
       status: result.status,
       recordsSeen: result.recordsSeen,
+      recordsPersisted: result.counts?.persisted,
+      recordsUnchanged: result.counts?.unchanged,
+      recordsFailed: result.counts?.failed,
       error: result.error
     });
   }

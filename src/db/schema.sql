@@ -87,3 +87,9 @@ CREATE INDEX IF NOT EXISTS source_runs_source_started_at_idx ON source_runs (sou
 CREATE INDEX IF NOT EXISTS cascade_states_region_started_at_idx ON cascade_states (region, stage_started_at DESC);
 CREATE INDEX IF NOT EXISTS cascade_states_started_at_idx ON cascade_states (stage_started_at DESC);
 CREATE INDEX IF NOT EXISTS notifications_sent_at_idx ON notifications (sent_at DESC);
+
+-- Persist counts, written after the write step (10-19). Before this the run
+-- was marked success before any row was written, with no counts at all.
+ALTER TABLE source_runs ADD COLUMN IF NOT EXISTS records_persisted INTEGER;
+ALTER TABLE source_runs ADD COLUMN IF NOT EXISTS records_unchanged INTEGER;
+ALTER TABLE source_runs ADD COLUMN IF NOT EXISTS records_failed INTEGER;

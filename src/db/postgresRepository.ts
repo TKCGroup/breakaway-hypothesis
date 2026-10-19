@@ -15,6 +15,7 @@ import type {
   EventUpsertResult,
   NotificationQuery,
   SourceRunQuery,
+  SourceRunResult,
   WatcherRepository
 } from "./repository.js";
 
@@ -89,6 +90,9 @@ interface SourceRunRow {
   completed_at: Date | null;
   status: SourceRun["status"];
   records_seen: number;
+  records_persisted: number | null;
+  records_unchanged: number | null;
+  records_failed: number | null;
   error: string | null;
 }
 
@@ -141,15 +145,22 @@ export class PostgresWatcherRepository implements WatcherRepository {
     return run;
   }
 
-  async finishSourceRun(
-    id: string,
-    result: { status: "success" | "error"; recordsSeen: number; error?: string; completedAt?: Date }
-  ): Promise<void> {
+  async finishSourceRun(id: string, result: SourceRunResult): Promise<void> {
     await this.pool.query(
       `UPDATE source_runs
-       SET completed_at = $2, status = $3, records_seen = $4, error = $5
+       SET completed_at = $2, status = $3, records_seen = $4, error = $5,
+           records_persisted = $6, records_unchanged = $7, records_failed = $8
        WHERE id = $1`,
-      [id, result.completedAt ?? new Date(), result.status, result.recordsSeen, result.error ?? null]
+      [
+        id,
+        result.completedAt ?? new Date(),
+        result.status,
+        result.recordsSeen,
+        result.error ?? null,
+        result.counts?.persisted ?? null,
+        result.counts?.unchanged ?? null,
+        result.counts?.failed ?? null
+      ]
     );
   }
 
@@ -161,7 +172,8 @@ export class PostgresWatcherRepository implements WatcherRepository {
     }
     return rows(
       await this.pool.query<SourceRunRow>(
-        `SELECT id, source, started_at, completed_at, status, records_seen, error
+        `SELECT id, source, started_at, completed_at, status, records_seen, error,
+                records_persisted, records_unchanged, records_failed
          FROM (
            SELECT *, row_number() OVER (PARTITION BY source ORDER BY started_at DESC) AS rn
            FROM source_runs
@@ -534,6 +546,9 @@ function sourceRunFromRow(row: SourceRunRow): SourceRun {
     completedAt: row.completed_at ?? undefined,
     status: row.status,
     recordsSeen: row.records_seen,
+    recordsPersisted: row.records_persisted ?? undefined,
+    recordsUnchanged: row.records_unchanged ?? undefined,
+    recordsFailed: row.records_failed ?? undefined,
     error: row.error ?? undefined
   };
 }

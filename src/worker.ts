@@ -38,17 +38,18 @@ export async function runOnce(now = new Date(), repo: WatcherRepository = new In
     { source: "tsunami_ptwc", run: () => fetchTsunamiFeed("ptwc", now) }
   ];
 
+  // A source run is `success` only after its rows are written. It used to be
+  // marked success straight after the fetch, before upsertEvent ran, so a
+  // failed write still read 96/96 success on the dashboard (10-15 evidence),
+  // and one failed write threw out of the whole cycle. Now each source writes
+  // its own rows, counts what happened, and a failed write fails only that
+  // source's run, loudly, with the counts in the record.
   const batches = await Promise.allSettled(
     sourceTasks.map(async (task) => {
       const run = await repo.startSourceRun(task.source, now);
+      let fetched: NormalizedEvent[];
       try {
-        const events = await task.run();
-        await repo.finishSourceRun(run.id, {
-          status: "success",
-          recordsSeen: events.length,
-          completedAt: new Date()
-        });
-        return events;
+        fetched = await task.run();
       } catch (error) {
         await repo.finishSourceRun(run.id, {
           status: "error",
@@ -58,13 +59,42 @@ export async function runOnce(now = new Date(), repo: WatcherRepository = new In
         });
         throw error;
       }
+
+      const written: NormalizedEvent[] = [];
+      const counts = { persisted: 0, unchanged: 0, failed: 0 };
+      const failures: string[] = [];
+      for (const event of fetched) {
+        try {
+          const result = await repo.upsertEvent(event);
+          if (result.status === "unchanged") {
+            counts.unchanged += 1;
+          } else {
+            counts.persisted += 1;
+          }
+          written.push(result.event);
+        } catch (error) {
+          counts.failed += 1;
+          if (failures.length < 3) {
+            failures.push(`${event.externalId}: ${error instanceof Error ? error.message : String(error)}`);
+          }
+        }
+      }
+
+      await repo.finishSourceRun(run.id, {
+        status: counts.failed > 0 ? "error" : "success",
+        recordsSeen: fetched.length,
+        counts,
+        error:
+          counts.failed > 0
+            ? `persist failed for ${counts.failed} of ${fetched.length} records (${failures.join("; ")})`
+            : undefined,
+        completedAt: new Date()
+      });
+      return written;
     })
   );
 
-  const events: NormalizedEvent[] = [];
-  for (const event of batches.flatMap((batch) => (batch.status === "fulfilled" ? batch.value : []))) {
-    events.push((await repo.upsertEvent(event)).event);
-  }
+  const events: NormalizedEvent[] = batches.flatMap((batch) => (batch.status === "fulfilled" ? batch.value : []));
   const cascadeEvents = events.filter((event) => !isDashboardContextOnly(event));
 
   const currentWindows: WatchWindow[] = [];

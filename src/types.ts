@@ -120,7 +120,18 @@ export interface SourceRun {
   completedAt?: Date;
   status: SourceRunStatus;
   recordsSeen: number;
+  // Written by the worker after the persist step. Absent on rows from before
+  // 10-19, so read as "not measured", never as zero.
+  recordsPersisted?: number;
+  recordsUnchanged?: number;
+  recordsFailed?: number;
   error?: string;
+}
+
+export interface SourceRunCounts {
+  persisted: number;
+  unchanged: number;
+  failed: number;
 }
 
 export interface NotificationRecord {
