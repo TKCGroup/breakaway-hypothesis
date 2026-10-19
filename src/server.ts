@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { fileURLToPath } from "node:url";
+import { gzipSync } from "node:zlib";
 import { loadConfig, type WatcherConfig } from "./config.js";
 import { closeSharedRepositories, sharedRepository, type RepositoryHandle } from "./db/createRepository.js";
 import { runMigrations } from "./db/migrations.js";
@@ -139,7 +140,36 @@ export function createWatcherServer(options: WatcherServerOptions = {}) {
   });
 }
 
+// /api/earth was 3.8 MB of JSON sent uncompressed. Responses over 1 KB are
+// gzipped when the client says it accepts gzip; the flag rides on the
+// response so every writer below honours it without threading `req` through.
+const gzipAccepted = new WeakSet<ServerResponse>();
+const GZIP_MIN_BYTES = 1024;
+
+function acceptsGzip(req: IncomingMessage): boolean {
+  const header = req.headers["accept-encoding"];
+  const value = Array.isArray(header) ? header.join(",") : header ?? "";
+  return value
+    .split(",")
+    .map((part) => part.trim().toLowerCase())
+    .some((part) => (part === "gzip" || part.startsWith("gzip;")) && !/;\s*q=0(\.0*)?$/.test(part));
+}
+
+function endBody(res: ServerResponse, statusCode: number, headers: Record<string, string>, body: string): void {
+  const vary = { vary: "accept-encoding" };
+  if (gzipAccepted.has(res) && Buffer.byteLength(body) > GZIP_MIN_BYTES) {
+    res.writeHead(statusCode, { ...headers, ...vary, "content-encoding": "gzip" });
+    res.end(gzipSync(body));
+    return;
+  }
+  res.writeHead(statusCode, { ...headers, ...vary });
+  res.end(body);
+}
+
 async function route(req: IncomingMessage, res: ServerResponse, context: ServerContext): Promise<void> {
+  if (acceptsGzip(req)) {
+    gzipAccepted.add(res);
+  }
   const pathname = new URL(req.url ?? "/", "http://localhost").pathname.replace(/\/+$/, "") || "/";
 
   if (pathname === "/" || pathname === "/healthz") {
@@ -234,11 +264,15 @@ function writeJson(
   body: unknown,
   cacheControl = "no-store"
 ): void {
-  res.writeHead(statusCode, {
-    "content-type": "application/json",
-    "cache-control": cacheControl
-  });
-  res.end(JSON.stringify(body));
+  endBody(
+    res,
+    statusCode,
+    {
+      "content-type": "application/json",
+      "cache-control": cacheControl
+    },
+    JSON.stringify(body)
+  );
 }
 
 function writeHtml(
@@ -247,7 +281,7 @@ function writeHtml(
   body: string,
   cacheControl = "no-store"
 ): void {
-  res.writeHead(statusCode, {
+  endBody(res, statusCode, {
     "content-type": "text/html; charset=utf-8",
     "cache-control": cacheControl,
     "content-security-policy": [
@@ -290,8 +324,7 @@ function writeHtml(
     "referrer-policy": "strict-origin-when-cross-origin",
     "x-content-type-options": "nosniff",
     "x-frame-options": "DENY"
-  });
-  res.end(body);
+  }, body);
 }
 
 function writeJavaScript(
@@ -300,12 +333,16 @@ function writeJavaScript(
   body: string,
   cacheControl: string
 ): void {
-  res.writeHead(statusCode, {
-    "content-type": "text/javascript; charset=utf-8",
-    "cache-control": cacheControl,
-    "x-content-type-options": "nosniff"
-  });
-  res.end(body);
+  endBody(
+    res,
+    statusCode,
+    {
+      "content-type": "text/javascript; charset=utf-8",
+      "cache-control": cacheControl,
+      "x-content-type-options": "nosniff"
+    },
+    body
+  );
 }
 
 async function start(): Promise<void> {

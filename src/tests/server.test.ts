@@ -349,3 +349,54 @@ async function listen(server = createWatcherServer()): Promise<{ url: string; cl
       })
   };
 }
+
+describe("response compression", () => {
+  async function rawGet(url: string, headers: Record<string, string>) {
+    const { request } = await import("node:http");
+    return new Promise<{ status: number; headers: Record<string, unknown>; body: Buffer }>((resolve, reject) => {
+      const req = request(url, { headers }, (res) => {
+        const chunks: Buffer[] = [];
+        res.on("data", (chunk: Buffer) => chunks.push(chunk));
+        res.on("end", () => resolve({ status: res.statusCode ?? 0, headers: res.headers, body: Buffer.concat(chunks) }));
+      });
+      req.on("error", reject);
+      req.end();
+    });
+  }
+
+  it("gzips /api/dashboard when the client accepts gzip, and not otherwise", async () => {
+    const { gunzipSync } = await import("node:zlib");
+    const repo = new InMemoryWatcherRepository();
+    const { url, close } = await listen(createWatcherServer({ createRepositoryHandle: () => ({ repo, close: async () => {} }) }));
+    try {
+      const zipped = await rawGet(`${url}/api/dashboard`, { "accept-encoding": "gzip, br" });
+      expect(zipped.status).toBe(200);
+      expect(zipped.headers["content-encoding"]).toBe("gzip");
+      expect(zipped.headers.vary).toBe("accept-encoding");
+      expect(JSON.parse(gunzipSync(zipped.body).toString("utf8"))).toMatchObject({ ok: true });
+
+      const plain = await rawGet(`${url}/api/dashboard`, {});
+      expect(plain.headers["content-encoding"]).toBeUndefined();
+      expect(JSON.parse(plain.body.toString("utf8"))).toMatchObject({ ok: true });
+
+      const refused = await rawGet(`${url}/api/dashboard`, { "accept-encoding": "gzip;q=0, identity" });
+      expect(refused.headers["content-encoding"]).toBeUndefined();
+    } finally {
+      await close();
+    }
+  });
+
+  it("gzips the Earth Watch HTML shell", async () => {
+    const { gunzipSync } = await import("node:zlib");
+    const { url, close } = await listen();
+    try {
+      const zipped = await rawGet(`${url}/earth`, { "accept-encoding": "gzip" });
+      expect(zipped.headers["content-encoding"]).toBe("gzip");
+      expect(zipped.headers["content-security-policy"]).toBeDefined();
+      expect(gunzipSync(zipped.body).toString("utf8")).toContain("<html");
+      expect(zipped.body.length).toBeLessThan(gunzipSync(zipped.body).length / 2);
+    } finally {
+      await close();
+    }
+  });
+});
