@@ -1,3 +1,4 @@
+import { payloadHash } from "../logic/payloadHash.js";
 import { stableEventDedupeKey } from "../logic/staleGate.js";
 import type {
   CascadeState,
@@ -129,7 +130,11 @@ export class InMemoryWatcherRepository implements WatcherRepository {
     const sourceUpdatedKey = stableEventDedupeKey(event);
     const existing = this.eventsBySourceExternalId.get(sourceExternalKey);
 
-    if (existing && this.eventDedupeKeys.has(sourceUpdatedKey)) {
+    if (
+      existing &&
+      this.eventDedupeKeys.has(sourceUpdatedKey) &&
+      payloadHash(existing.rawJson) === payloadHash(event.rawJson)
+    ) {
       return { event: existing, status: "unchanged" };
     }
 

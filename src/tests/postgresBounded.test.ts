@@ -83,4 +83,13 @@ describe.skipIf(!url)("bounded snapshot against real Postgres", () => {
     const bounded = (await repo.listSourceRuns({ latestPerSource: 1 })).find((item) => item.id === run.id);
     expect(bounded?.recordsPersisted).toBe(3);
   });
+
+  it("treats a jsonb round trip as unchanged and a changed payload as updated", async () => {
+    const { eventFixture } = await import("./helpers.js");
+    const base = { id: "hash-probe", externalId: "hash-probe", sourceUpdatedAt: new Date("2026-07-08T11:00:00.000Z") };
+    // Keys out of jsonb's storage order on purpose.
+    expect((await repo.upsertEvent(eventFixture({ ...base, rawJson: { zeta: 1, alpha: { y: 2, b: [3, 1] }, mid: "m" } }))).status).toBe("inserted");
+    expect((await repo.upsertEvent(eventFixture({ ...base, rawJson: { mid: "m", zeta: 1, alpha: { b: [3, 1], y: 2 } } }))).status).toBe("unchanged");
+    expect((await repo.upsertEvent(eventFixture({ ...base, rawJson: { mid: "m", zeta: 2, alpha: { b: [3, 1], y: 2 } } }))).status).toBe("updated");
+  });
 });

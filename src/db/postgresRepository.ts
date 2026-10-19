@@ -1,4 +1,5 @@
 import { Pool, type PoolConfig, type QueryResult, type QueryResultRow } from "pg";
+import { payloadHash } from "../logic/payloadHash.js";
 import { stableEventDedupeKey } from "../logic/staleGate.js";
 import type {
   CascadeState,
@@ -191,7 +192,11 @@ export class PostgresWatcherRepository implements WatcherRepository {
       [event.source, event.externalId]
     );
     const existingEvent = existing.rows[0] ? eventFromRow(existing.rows[0]) : undefined;
-    if (existingEvent && stableEventDedupeKey(existingEvent) === stableEventDedupeKey(event)) {
+    if (
+      existingEvent &&
+      stableEventDedupeKey(existingEvent) === stableEventDedupeKey(event) &&
+      payloadHash(existingEvent.rawJson) === payloadHash(event.rawJson)
+    ) {
       return { event: existingEvent, status: "unchanged" };
     }
 
